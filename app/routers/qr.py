@@ -1,0 +1,63 @@
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.schemas import (
+    CreateQRCodeRequest,
+    CreateQRCodeResponse,
+    GetQRCodeResponse,
+    QRCodeImageResponse,
+    UpdateQRCodeRequest,
+)
+from app.services.qr_service import (
+    create_qr_code,
+    delete_qr_code,
+    get_or_generate_image,
+    get_qr_code,
+    update_qr_code,
+)
+
+router = APIRouter(prefix="/v1", tags=["qr"])
+
+
+@router.post("/qr_code", status_code=201, response_model=CreateQRCodeResponse)
+def create(request: CreateQRCodeRequest, db: Session = Depends(get_db)):
+    token = create_qr_code(db, request.url)
+    return CreateQRCodeResponse(qr_token=token)
+
+
+@router.get("/qr_code_image/{qr_token}", response_model=QRCodeImageResponse)
+def get_image(
+    qr_token: str,
+    dimension: int = Query(default=256, ge=32, le=2048),
+    color: str = Query(default="#000000", pattern=r"^#[0-9a-fA-F]{6}$"),
+    border: int = Query(default=4, ge=0, le=20),
+    db: Session = Depends(get_db),
+):
+    image_spec = {"dimension": dimension, "color": color, "border": border}
+    location = get_or_generate_image(db, qr_token, image_spec)
+    if not location:
+        raise HTTPException(status_code=404, detail="QR code not found")
+    return QRCodeImageResponse(image_location=location)
+
+
+@router.get("/qr_code/{qr_token}", response_model=GetQRCodeResponse)
+def get_one(qr_token: str, db: Session = Depends(get_db)):
+    qr = get_qr_code(db, qr_token)
+    if not qr:
+        raise HTTPException(status_code=404, detail="QR code not found")
+    return GetQRCodeResponse(url=qr.url)
+
+
+@router.put("/qr_code/{qr_token}", status_code=204)
+def update(qr_token: str, request: UpdateQRCodeRequest, db: Session = Depends(get_db)):
+    if not update_qr_code(db, qr_token, request.url):
+        raise HTTPException(status_code=404, detail="QR code not found")
+    return Response(status_code=204)
+
+
+@router.delete("/qr_code/{qr_token}", status_code=204)
+def delete(qr_token: str, db: Session = Depends(get_db)):
+    if not delete_qr_code(db, qr_token):
+        raise HTTPException(status_code=404, detail="QR code not found")
+    return Response(status_code=204)

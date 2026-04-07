@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m venv venv)",
+      "Bash(source venv/bin/activate)",
+      "Bash(pip install:*)",
+      "Bash(TOKEN=\"5KkpHK3Pzm\")",
+      "Bash(curl -s http://localhost:8000/v1/qr_code/$TOKEN)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s \"http://localhost:8000/v1/qr_code_image/$TOKEN?dimension=256&color=%23000000&border=4\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X PUT http://localhost:8000/v1/qr_code/$TOKEN -H \"Content-Type: application/json\" -d '{\"\"\"\"url\"\"\"\": \"\"\"\"https://new-url.com\"\"\"\"}')",
+      "Bash(curl -s -o /dev/null -w \"%{http_code} %{redirect_url}\" http://localhost:8000/$TOKEN)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X DELETE http://localhost:8000/v1/qr_code/$TOKEN)",
+      "Bash(curl -s -w \"\\\\n%{http_code}\" http://localhost:8000/v1/qr_code/$TOKEN)",
+      "Bash(curl -s -o /tmp/test_qr.png -w \"%{http_code}\" \"http://localhost:8000/static/qr/5KkpHK3Pzm/c9d769b781bd9e40.png\")",
+      "Read(//tmp/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true
+  }
+}

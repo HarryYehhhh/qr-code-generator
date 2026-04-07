@@ -1,0 +1,10 @@
+fastapi==0.135.2
+uvicorn[standard]==0.42.0
+sqlalchemy==2.0.48
+pydantic-settings==2.13.1
+qrcode[pil]==8.2
+python-dotenv==1.2.2
+psycopg2-binary==2.9.10
+google-cloud-storage==2.19.0
+pytest==8.3.5
+httpx==0.28.1
