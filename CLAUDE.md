@@ -21,13 +21,21 @@ curl -X POST http://localhost:8000/v1/qr_code -H "Content-Type: application/json
 curl http://localhost:8000/v1/qr_code/{qr_token}
 curl "http://localhost:8000/v1/qr_code_image/{qr_token}?dimension=256&color=%23000000&border=4"
 
+# Run tests
+pytest tests/ -v
+
+# Run a single test
+pytest tests/test_qr.py::TestCreateQRCode::test_create_success -v
+
 # Docker (production image)
 docker build -t qr-code-generator .
 docker run -p 8080:8080 --env-file .env.prod qr-code-generator
 
-# Deploy to Cloud Run
-gcloud builds submit --tag gcr.io/<PROJECT_ID>/qr-code-generator
-gcloud run deploy qr-code-generator --image gcr.io/<PROJECT_ID>/qr-code-generator --region asia-east1
+# Deploy to Cloud Run (via Artifact Registry)
+gcloud builds submit --tag asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/qr-code-generator
+gcloud run deploy qr-code-generator \
+  --image asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/qr-code-generator \
+  --region asia-east1
 ```
 
 ## Architecture
@@ -62,8 +70,15 @@ DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries fi
 - `GET /v1/qr_code_image/{token}?dimension=&color=&border=` → `{"image_location": "..."}` (200)
 - `GET /{token}` → 302 redirect
 
+### Testing
+Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `tests/conftest.py` overrides the `get_db` dependency so tests never touch the dev database. Each test gets a fresh schema via `create_all` / `drop_all`.
+
 ### Production Infrastructure (GCP)
-- **Cloud Run**: Stateless container, port 8080, env vars set via `--set-env-vars`
+- **Cloud Run**: Stateless container, port 8080, env vars set via `--update-env-vars`
 - **Cloud SQL**: PostgreSQL 15 via Unix socket (`/cloudsql/<connection_name>`)
 - **Cloud Storage**: QR images uploaded to GCS bucket
 - **CDN**: Serves images publicly from GCS via Cloud CDN
+- **Artifact Registry**: Docker images stored in `asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/`
+
+### Deployment Gotcha (zsh)
+When setting `DATABASE_URL` via `gcloud run --set-env-vars`, use `^||^` custom delimiter or single quotes to prevent zsh from interpreting `?` in the connection string. See README.md for the full deploy command.

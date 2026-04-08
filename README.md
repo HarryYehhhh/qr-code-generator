@@ -98,18 +98,88 @@ Uses FastAPI `TestClient` with an isolated test database — no side effects on 
 
 ## Production Deployment (GCP)
 
-1. **Cloud SQL** — PostgreSQL 15 instance
-2. **Cloud Storage** — Bucket for QR images, public read via CDN
-3. **Cloud Run** — Stateless container, env vars configured via `--set-env-vars`
+Prerequisites: [gcloud CLI](https://cloud.google.com/sdk/docs/install) installed, GCP account with billing enabled.
+
+### 1. Setup Project & Enable APIs
 
 ```bash
-# Build & deploy
-gcloud builds submit --tag gcr.io/<PROJECT_ID>/qr-code-generator
+gcloud projects create <PROJECT_ID>
+gcloud config set project <PROJECT_ID>
+gcloud services enable \
+  run.googleapis.com \
+  sqladmin.googleapis.com \
+  storage.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com
+```
+
+### 2. Create Cloud SQL (PostgreSQL)
+
+```bash
+gcloud sql instances create qr-db \
+  --database-version=POSTGRES_15 \
+  --tier=db-f1-micro \
+  --region=asia-east1
+
+gcloud sql databases create qrdb --instance=qr-db
+gcloud sql users set-password postgres --instance=qr-db --password=<DB_PASSWORD>
+```
+
+### 3. Create Cloud Storage Bucket
+
+```bash
+gcloud storage buckets create gs://<BUCKET_NAME> \
+  --location=asia-east1 \
+  --uniform-bucket-level-access
+
+gcloud storage buckets add-iam-policy-binding gs://<BUCKET_NAME> \
+  --member=allUsers \
+  --role=roles/storage.objectViewer
+```
+
+### 4. Create Artifact Registry & Build Image
+
+```bash
+gcloud artifacts repositories create qr-repo \
+  --repository-format=docker \
+  --location=asia-east1
+
+gcloud builds submit \
+  --tag asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/qr-code-generator
+```
+
+### 5. Deploy to Cloud Run
+
+```bash
 gcloud run deploy qr-code-generator \
-  --image gcr.io/<PROJECT_ID>/qr-code-generator \
+  --image asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/qr-code-generator \
   --region asia-east1 \
+  --platform managed \
   --allow-unauthenticated \
-  --add-cloudsql-instances <PROJECT_ID>:asia-east1:qr-db
+  --add-cloudsql-instances <PROJECT_ID>:asia-east1:qr-db \
+  --set-env-vars "ENVIRONMENT=production" \
+  --set-env-vars "DATABASE_URL=postgresql+psycopg2://postgres:<DB_PASSWORD>@/qrdb?host=/cloudsql/<PROJECT_ID>:asia-east1:qr-db" \
+  --set-env-vars "GCS_BUCKET=<BUCKET_NAME>" \
+  --set-env-vars "CDN_BASE_URL=https://storage.googleapis.com/<BUCKET_NAME>" \
+  --set-env-vars "BASE_URL=https://<CLOUD_RUN_URL>" \
+  --set-env-vars "SERVER_SECRET=$(openssl rand -hex 32)"
+```
+
+### 6. Verify
+
+```bash
+curl -X POST https://<CLOUD_RUN_URL>/v1/qr_code \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+```
+
+### Cleanup (avoid ongoing charges)
+
+```bash
+gcloud sql instances delete qr-db --quiet
+gcloud run services delete qr-code-generator --region asia-east1 --quiet
+gcloud storage rm -r gs://<BUCKET_NAME>
+gcloud artifacts repositories delete qr-repo --location=asia-east1 --quiet
 ```
 
 See `.env.prod` for the full list of production environment variables.
