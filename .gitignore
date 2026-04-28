@@ -12,3 +12,4 @@ qr_codes/
 !flow.png
 node_modules/
 frontend/dist/
+.claude
