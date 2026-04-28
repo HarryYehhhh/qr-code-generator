@@ -1,9 +1,10 @@
 # QR Code Generator
 
-A RESTful API service for creating, managing, and serving dynamic QR codes. Built with FastAPI, designed for local development with SQLite and production deployment on Google Cloud (Cloud Run + Cloud SQL + Cloud Storage + CDN).
+A full-stack QR code management service. Vue 3 frontend + FastAPI backend, with dynamic redirect links, click tracking, and customisable QR images. Designed for local development with SQLite and production deployment on Google Cloud (Cloud Run + Cloud SQL + Cloud Storage + CDN).
 
 ## Tech Stack
 
+**Backend**
 - **Framework**: FastAPI + Uvicorn
 - **ORM**: SQLAlchemy 2.0
 - **Validation**: Pydantic v2
@@ -12,21 +13,27 @@ A RESTful API service for creating, managing, and serving dynamic QR codes. Buil
 - **Storage**: Local filesystem (local) / Google Cloud Storage (production)
 - **Deployment**: Docker + Cloud Run
 
+**Frontend**
+- **Framework**: Vue 3 + TypeScript
+- **Build tool**: Vite
+
 ## Architecture
 
 ### Local Development
 
 ```mermaid
 graph LR
-    Client[Client / Browser]
+    Browser[Browser :5173]
+    Vite[Vite Dev Server]
     API[FastAPI :8000]
     DB[(SQLite)]
     FS[Local File Storage]
 
-    Client -->|HTTP Request| API
+    Browser -->|Vue app| Vite
+    Vite -->|proxy /v1 /r /static| API
     API -->|read/write| DB
     API -->|save/read image| FS
-    API -->|/static mount| Client
+    API -->|/static mount| Browser
 ```
 
 ### Production (GCP)
@@ -53,11 +60,14 @@ The `ENVIRONMENT` setting (`local` / `production`) switches database, storage ba
 | Method | Path | Description | Status |
 |--------|------|-------------|--------|
 | `POST` | `/v1/qr_code` | Create a new QR code | 201 |
-| `GET` | `/v1/qr_code/{token}` | Get QR code metadata | 200 |
+| `GET` | `/v1/qr_codes` | List all QR codes | 200 |
+| `GET` | `/v1/qr_code/{token}` | Get QR code metadata | 200 / 410 |
 | `PUT` | `/v1/qr_code/{token}` | Update target URL | 204 |
 | `DELETE` | `/v1/qr_code/{token}` | Soft delete QR code | 204 |
 | `GET` | `/v1/qr_code_image/{token}` | Generate/fetch QR image | 200 |
-| `GET` | `/{token}` | 302 redirect to target URL | 302 |
+| `GET` | `/r/{token}` | 302 redirect to target URL | 302 |
+
+`GET /v1/qr_code/{token}` returns **410** (not 404) for soft-deleted records.
 
 ### Image Query Parameters
 
@@ -70,15 +80,20 @@ The `ENVIRONMENT` setting (`local` / `production`) switches database, storage ba
 ## Quick Start
 
 ```bash
-# Setup
+# Backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-
-# Run
 uvicorn app.main:app --reload --port 8000
 
-# Try it
+# Frontend (separate terminal)
+cd frontend && npm install && npm run dev
+# Open http://localhost:5173
+```
+
+Or use the API directly:
+
+```bash
 curl -X POST http://localhost:8000/v1/qr_code \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com"}'
@@ -86,6 +101,9 @@ curl -X POST http://localhost:8000/v1/qr_code \
 
 curl "http://localhost:8000/v1/qr_code_image/aBcDeFgHiJ?dimension=256"
 # → {"image_location": "http://localhost:8000/static/qr/aBcDeFgHiJ/xxxxx.png"}
+
+curl -L http://localhost:8000/r/aBcDeFgHiJ
+# → 302 → https://example.com
 ```
 
 ## Testing
@@ -187,7 +205,7 @@ See `.env.prod` for the full list of production environment variables.
 ## Key Design Decisions
 
 - **Soft delete** — Records are never physically removed; `status` field filters active entries
-- **302 redirect** (not 301) — Allows URL updates to take effect immediately
+- **302 redirect** (not 301) — Allows URL updates to take effect immediately; each redirect atomically increments `click_count`
 - **Spec hashing** — QR images are cached by `SHA-256(image_spec)`, avoiding regeneration for identical parameters
 - **Token generation** — `SHA-256(url + nonce + secret)` → Base62, first 10 chars. Retries on collision.
 - **Pluggable storage** — `StorageBackend` ABC with factory pattern; swap backends without touching business logic

@@ -5,13 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development Commands
 
 ```bash
-# Setup
+# Backend setup
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 
-# Run dev server
+# Run backend dev server
 uvicorn app.main:app --reload --port 8000
+
+# Frontend setup & dev server (port 5173)
+cd frontend && npm install && npm run dev
 
 # Reset database (no migrations, just delete and restart)
 rm -f qr_codes.db
@@ -20,6 +23,7 @@ rm -f qr_codes.db
 curl -X POST http://localhost:8000/v1/qr_code -H "Content-Type: application/json" -d '{"url": "https://example.com"}'
 curl http://localhost:8000/v1/qr_code/{qr_token}
 curl "http://localhost:8000/v1/qr_code_image/{qr_token}?dimension=256&color=%23000000&border=4"
+curl -L http://localhost:8000/r/{qr_token}
 
 # Run tests
 pytest tests/ -v
@@ -40,7 +44,7 @@ gcloud run deploy qr-code-generator \
 
 ## Architecture
 
-QR Code Generator using FastAPI, with dual-environment support: SQLite + local files (local dev) and Cloud SQL PostgreSQL + Cloud Storage + CDN (production on Cloud Run).
+QR Code Generator using FastAPI backend + Vue 3 / TypeScript frontend, with dual-environment support: SQLite + local files (local dev) and Cloud SQL PostgreSQL + Cloud Storage + CDN (production on Cloud Run).
 
 ### ENV Switch Pattern
 `ENVIRONMENT` in `app/config.py` controls all behavior switching:
@@ -60,15 +64,19 @@ Storage backend is swapped via factory pattern in `app/storage/factory.py`. GCS 
 DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries filter `status == 'active'`. Rows are never physically removed.
 
 ### Redirect Route
-`GET /{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Updates `last_clicked_at` on each redirect. Registered **after** `/v1` router to avoid path conflicts.
+`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Atomically increments `click_count` and updates `last_clicked_at` on each redirect. Registered **after** `/v1` router to avoid path conflicts.
 
-### API Contracts (from plan.md)
+### API Contracts
 - `POST /v1/qr_code` → `{"qr_token": "..."}` (201)
-- `GET /v1/qr_code/{token}` → `{"url": "..."}` (200)
+- `GET /v1/qr_codes` → `[{qr_token, url, click_count, status, created_at}]` (200)
+- `GET /v1/qr_code/{token}` → `{url, click_count, status, created_at}` (200) or 410 if deleted
 - `PUT /v1/qr_code/{token}` → 204
 - `DELETE /v1/qr_code/{token}` → 204 (soft delete)
 - `GET /v1/qr_code_image/{token}?dimension=&color=&border=` → `{"image_location": "..."}` (200)
-- `GET /{token}` → 302 redirect
+- `GET /r/{token}` → 302 redirect
+
+### Frontend (Vue 3 + TypeScript)
+Lives in `frontend/`. Vite dev server (port 5173) proxies `/v1`, `/static`, `/r` to the backend at port 8000 — this proxy config must stay in sync with actual backend routes. **Restart Vite after changing `vite.config.ts`** (proxy changes are not hot-reloaded). `shortUrl` in `QRCodeDisplay.vue` is hardcoded to `localhost:8000` — update this for production.
 
 ### Testing
 Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `tests/conftest.py` overrides the `get_db` dependency so tests never touch the dev database. Each test gets a fresh schema via `create_all` / `drop_all`.
