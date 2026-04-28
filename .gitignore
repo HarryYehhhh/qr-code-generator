@@ -10,3 +10,5 @@ qr_codes/
 *.png
 !architecture.png
 !flow.png
+node_modules/
+frontend/dist/

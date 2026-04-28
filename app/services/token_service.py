@@ -16,7 +16,7 @@ def _base62_encode(num: int) -> str:
 
 
 def generate_qr_token(url: str, server_secret: str) -> str:
-    nonce = os.urandom(16).hex
+    nonce = os.urandom(16).hex()
     raw = f"{url}{nonce}{server_secret}"
     digest = hashlib.sha256(raw.encode("utf-8")).digest()
     num = int.from_bytes(digest[:16], "big")

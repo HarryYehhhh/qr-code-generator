@@ -19,11 +19,21 @@ class TestGetQRCode:
         token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
         resp = client.get(f"/v1/qr_code/{token}")
         assert resp.status_code == 200
-        assert resp.json()["url"] == "https://example.com"
+        data = resp.json()
+        assert data["url"] == "https://example.com"
+        assert data["click_count"] == 0
+        assert data["status"] == "active"
+        assert "created_at" in data
 
     def test_get_not_found(self, client):
         resp = client.get("/v1/qr_code/nonexistent")
         assert resp.status_code == 404
+
+    def test_get_deleted_returns_410(self, client):
+        token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
+        client.delete(f"/v1/qr_code/{token}")
+        resp = client.get(f"/v1/qr_code/{token}")
+        assert resp.status_code == 410
 
 
 class TestUpdateQRCode:
@@ -46,9 +56,9 @@ class TestDeleteQRCode:
         resp = client.delete(f"/v1/qr_code/{token}")
         assert resp.status_code == 204
 
-        # 刪除後查不到（soft delete）
+        # 刪除後回傳 410（soft delete）
         resp = client.get(f"/v1/qr_code/{token}")
-        assert resp.status_code == 404
+        assert resp.status_code == 410
 
     def test_delete_not_found(self, client):
         resp = client.delete("/v1/qr_code/nonexistent")
@@ -71,10 +81,23 @@ class TestQRCodeImage:
 class TestRedirect:
     def test_redirect_success(self, client):
         token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
-        resp = client.get(f"/{token}", follow_redirects=False)
+        resp = client.get(f"/r/{token}", follow_redirects=False)
         assert resp.status_code == 302
         assert resp.headers["location"] == "https://example.com"
 
     def test_redirect_not_found(self, client):
-        resp = client.get("/nonexistent", follow_redirects=False)
+        resp = client.get("/r/nonexistent", follow_redirects=False)
         assert resp.status_code == 404
+
+    def test_redirect_increments_click_count(self, client):
+        token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
+        client.get(f"/r/{token}", follow_redirects=False)
+        client.get(f"/r/{token}", follow_redirects=False)
+        resp = client.get(f"/v1/qr_code/{token}")
+        assert resp.json()["click_count"] == 2
+
+    def test_redirect_deleted_returns_410(self, client):
+        token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
+        client.delete(f"/v1/qr_code/{token}")
+        resp = client.get(f"/r/{token}", follow_redirects=False)
+        assert resp.status_code == 410

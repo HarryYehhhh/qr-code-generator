@@ -7,6 +7,7 @@ from app.schemas import (
     CreateQRCodeResponse,
     GetQRCodeResponse,
     QRCodeImageResponse,
+    QRCodeListItem,
     UpdateQRCodeRequest,
 )
 from app.services.qr_service import (
@@ -14,10 +15,27 @@ from app.services.qr_service import (
     delete_qr_code,
     get_or_generate_image,
     get_qr_code,
+    get_qr_code_any_status,
+    list_qr_codes,
     update_qr_code,
 )
 
 router = APIRouter(prefix="/v1", tags=["qr"])
+
+
+@router.get("/qr_codes", response_model=list[QRCodeListItem])
+def list_all(db: Session = Depends(get_db)):
+    qr_list = list_qr_codes(db)
+    return [
+        QRCodeListItem(
+            qr_token=qr.qr_token,
+            url=qr.url,
+            click_count=qr.click_count,
+            status=qr.status,
+            created_at=qr.created_at,
+        )
+        for qr in qr_list
+    ]
 
 
 @router.post("/qr_code", status_code=201, response_model=CreateQRCodeResponse)
@@ -43,10 +61,17 @@ def get_image(
 
 @router.get("/qr_code/{qr_token}", response_model=GetQRCodeResponse)
 def get_one(qr_token: str, db: Session = Depends(get_db)):
-    qr = get_qr_code(db, qr_token)
+    qr = get_qr_code_any_status(db, qr_token)
     if not qr:
         raise HTTPException(status_code=404, detail="QR code not found")
-    return GetQRCodeResponse(url=qr.url)
+    if qr.status == "deleted":
+        raise HTTPException(status_code=410, detail="QR code has been deleted")
+    return GetQRCodeResponse(
+        url=qr.url,
+        click_count=qr.click_count,
+        status=qr.status,
+        created_at=qr.created_at,
+    )
 
 
 @router.put("/qr_code/{qr_token}", status_code=204)

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -20,6 +22,17 @@ class CreateQRCodeResponse(BaseModel):
 
 class GetQRCodeResponse(BaseModel):
     url: str
+    click_count: int
+    status: str
+    created_at: datetime
+
+
+class QRCodeListItem(BaseModel):
+    qr_token: str
+    url: str
+    click_count: int
+    status: str
+    created_at: datetime
 
 
 class UpdateQRCodeRequest(BaseModel):

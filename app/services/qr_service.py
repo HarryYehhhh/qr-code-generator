@@ -36,6 +36,18 @@ def get_qr_code(db: Session, qr_token: str) -> QRCode | None:
     )
 
 
+def get_qr_code_any_status(db: Session, qr_token: str) -> QRCode | None:
+    return db.query(QRCode).filter(QRCode.qr_token == qr_token).first()
+
+
+def list_qr_codes(db: Session) -> list[QRCode]:
+    return (
+        db.query(QRCode)
+        .order_by(QRCode.created_at.desc())
+        .all()
+    )
+
+
 def update_qr_code(db: Session, qr_token: str, url: str) -> bool:
     qr = get_qr_code(db, qr_token)
     if not qr:
@@ -79,6 +91,11 @@ def redirect_qr_code(db: Session, qr_token: str) -> str | None:
     qr = get_qr_code(db, qr_token)
     if not qr:
         return None
-    qr.last_clicked_at = datetime.now(timezone.utc)
+    db.query(QRCode).filter(QRCode.id == qr.id).update(
+        {
+            QRCode.click_count: QRCode.click_count + 1,
+            QRCode.last_clicked_at: datetime.now(timezone.utc),
+        }
+    )
     db.commit()
     return qr.url
