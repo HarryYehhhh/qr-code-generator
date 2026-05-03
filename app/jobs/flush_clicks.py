@@ -70,6 +70,23 @@ def _drain(redis: Redis, db: Session, key: str, bucket: datetime, batch_size: in
                 ),
                 rows,
             )
+            # keep qr_codes.click_count and last_clicked_at eventually consistent
+            db.execute(
+                text(
+                    """
+                    UPDATE qr_codes
+                    SET
+                        click_count = click_count + :count,
+                        last_clicked_at = CASE
+                            WHEN last_clicked_at IS NULL OR last_clicked_at < :bucket
+                            THEN :bucket
+                            ELSE last_clicked_at
+                        END
+                    WHERE qr_token = :token AND status = 'active'
+                    """
+                ),
+                rows,
+            )
             total += len(rows)
         if cursor == 0:
             break

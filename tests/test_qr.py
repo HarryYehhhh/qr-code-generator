@@ -89,12 +89,45 @@ class TestRedirect:
         resp = client.get("/r/nonexistent", follow_redirects=False)
         assert resp.status_code == 404
 
-    def test_redirect_increments_click_count(self, client):
+    def test_redirect_records_click_in_redis(self, client, fake_redis):
+        from datetime import datetime, timezone
+
         token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
         client.get(f"/r/{token}", follow_redirects=False)
         client.get(f"/r/{token}", follow_redirects=False)
-        resp = client.get(f"/v1/qr_code/{token}")
-        assert resp.json()["click_count"] == 2
+
+        hour = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+        count = fake_redis.hget(f"qr:clicks:{hour}", token)
+        assert int(count) == 2
+
+    def test_redirect_cache_hit(self, client, fake_redis):
+        token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
+        # first hit populates cache
+        client.get(f"/r/{token}", follow_redirects=False)
+        # simulate cache hit by checking key exists
+        assert fake_redis.get(f"qr:url:{token}") == b"https://example.com"
+        # second redirect still works from cache
+        resp = client.get(f"/r/{token}", follow_redirects=False)
+        assert resp.status_code == 302
+
+    def test_redirect_update_invalidates_cache(self, client, fake_redis):
+        token = client.post("/v1/qr_code", json={"url": "https://old.com"}).json()["qr_token"]
+        client.get(f"/r/{token}", follow_redirects=False)
+        assert fake_redis.get(f"qr:url:{token}") is not None
+
+        client.put(f"/v1/qr_code/{token}", json={"url": "https://new.com"})
+        assert fake_redis.get(f"qr:url:{token}") is None
+
+        resp = client.get(f"/r/{token}", follow_redirects=False)
+        assert resp.headers["location"] == "https://new.com"
+
+    def test_redirect_delete_invalidates_cache(self, client, fake_redis):
+        token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
+        client.get(f"/r/{token}", follow_redirects=False)
+        assert fake_redis.get(f"qr:url:{token}") is not None
+
+        client.delete(f"/v1/qr_code/{token}")
+        assert fake_redis.get(f"qr:url:{token}") is None
 
     def test_redirect_deleted_returns_410(self, client):
         token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]

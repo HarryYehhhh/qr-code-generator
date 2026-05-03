@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from redis import Redis
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.dependencies import get_redis
 from app.schemas import (
     CreateQRCodeRequest,
     CreateQRCodeResponse,
@@ -75,14 +77,23 @@ def get_one(qr_token: str, db: Session = Depends(get_db)):
 
 
 @router.put("/qr_code/{qr_token}", status_code=204)
-def update(qr_token: str, request: UpdateQRCodeRequest, db: Session = Depends(get_db)):
-    if not update_qr_code(db, qr_token, request.url):
+def update(
+    qr_token: str,
+    request: UpdateQRCodeRequest,
+    db: Session = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    if not update_qr_code(db, qr_token, request.url, redis=redis):
         raise HTTPException(status_code=404, detail="QR code not found")
     return Response(status_code=204)
 
 
 @router.delete("/qr_code/{qr_token}", status_code=204)
-def delete(qr_token: str, db: Session = Depends(get_db)):
-    if not delete_qr_code(db, qr_token):
+def delete(
+    qr_token: str,
+    db: Session = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    if not delete_qr_code(db, qr_token, redis=redis):
         raise HTTPException(status_code=404, detail="QR code not found")
     return Response(status_code=204)

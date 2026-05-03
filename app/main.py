@@ -1,16 +1,18 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from redis import Redis
 from sqlalchemy.orm import Session
-
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import Base, engine, get_db
+from app.dependencies import get_redis
 from app.routers import internal as internal_router
 from app.routers import qr
 from app.services.qr_service import get_qr_code_any_status
@@ -61,16 +63,31 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 @app.get("/r/{qr_token}")
-def redirect(qr_token: str, db: Session = Depends(get_db)):
+def redirect(
+    qr_token: str,
+    db: Session = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    cache_key = f"qr:url:{qr_token}"
+    cached_url = redis.get(cache_key)
+    if cached_url:
+        _record_click(redis, qr_token)
+        return RedirectResponse(url=cached_url.decode(), status_code=302)
+
     qr = get_qr_code_any_status(db, qr_token)
     if not qr:
         raise HTTPException(status_code=404, detail="QR code not found")
     if qr.status == "deleted":
         raise HTTPException(status_code=410, detail="QR code has been deleted")
-    from app.services.qr_service import redirect_qr_code
 
-    redirect_qr_code(db, qr_token)
+    redis.setex(cache_key, 86400, qr.url)
+    _record_click(redis, qr_token)
     return RedirectResponse(url=qr.url, status_code=302)
+
+
+def _record_click(redis: Redis, token: str) -> None:
+    hour = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+    redis.hincrby(f"qr:clicks:{hour}", token, 1)
 
 
 if settings.ENVIRONMENT == "local":

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from redis import Redis
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -8,6 +9,8 @@ from app.models import QRCode
 from app.services.image_service import compute_spec_hash, generate_qr_image
 from app.services.token_service import generate_qr_token
 from app.storage.factory import get_storage
+
+URL_CACHE_TTL = 86400  # 24 h
 
 storage = get_storage()
 MAX_RETRIES = 5
@@ -48,17 +51,19 @@ def list_qr_codes(db: Session) -> list[QRCode]:
     )
 
 
-def update_qr_code(db: Session, qr_token: str, url: str) -> bool:
+def update_qr_code(db: Session, qr_token: str, url: str, redis: Redis | None = None) -> bool:
     qr = get_qr_code(db, qr_token)
     if not qr:
         return False
     qr.url = url
     qr.updated_at = datetime.now(timezone.utc)
     db.commit()
+    if redis:
+        redis.delete(f"qr:url:{qr_token}")
     return True
 
 
-def delete_qr_code(db: Session, qr_token: str) -> bool:
+def delete_qr_code(db: Session, qr_token: str, redis: Redis | None = None) -> bool:
     qr = get_qr_code(db, qr_token)
     if not qr:
         return False
@@ -67,6 +72,8 @@ def delete_qr_code(db: Session, qr_token: str) -> bool:
     qr.deleted_at = now
     qr.updated_at = now
     db.commit()
+    if redis:
+        redis.delete(f"qr:url:{qr_token}")
     return True
 
 
@@ -85,17 +92,3 @@ def get_or_generate_image(db: Session, qr_token: str, image_spec: dict) -> str |
     if settings.CDN_BASE_URL:
         return f"{settings.CDN_BASE_URL}/{path}"
     return f"{settings.BASE_URL}/static/{path}"
-
-
-def redirect_qr_code(db: Session, qr_token: str) -> str | None:
-    qr = get_qr_code(db, qr_token)
-    if not qr:
-        return None
-    db.query(QRCode).filter(QRCode.id == qr.id).update(
-        {
-            QRCode.click_count: QRCode.click_count + 1,
-            QRCode.last_clicked_at: datetime.now(timezone.utc),
-        }
-    )
-    db.commit()
-    return qr.url

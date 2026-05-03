@@ -1,12 +1,13 @@
+import fakeredis
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
+from app.dependencies import get_redis
 from app.main import app
 
-# 用 in-memory SQLite，每次測試都是乾淨的 DB
 TEST_DATABASE_URL = "sqlite:///./test_qr_codes.db"
 
 engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
@@ -30,9 +31,15 @@ def setup_db():
 
 
 @pytest.fixture()
-def client():
-    """提供覆蓋了 DB dependency 的 TestClient。"""
+def fake_redis():
+    return fakeredis.FakeRedis()
+
+
+@pytest.fixture()
+def client(fake_redis):
+    """提供覆蓋了 DB 與 Redis dependency 的 TestClient。"""
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_redis] = lambda: fake_redis
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
