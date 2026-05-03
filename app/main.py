@@ -11,13 +11,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import Base, engine, get_db
+from app.routers import internal as internal_router
 from app.routers import qr
 from app.services.qr_service import get_qr_code_any_status
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    # SQLite (local dev) auto-creates tables for fast reset; PostgreSQL relies
+    # on `alembic upgrade head` so production schema stays version-controlled
+    if settings.DATABASE_URL.startswith("sqlite"):
+        Base.metadata.create_all(bind=engine)
     yield
 
 
@@ -32,6 +36,7 @@ app.add_middleware(
 )
 
 app.include_router(qr.router)
+app.include_router(internal_router.router)
 
 
 @app.exception_handler(RequestValidationError)

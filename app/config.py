@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     SERVER_SECRET: str = "local-dev-secret-change-me"
     GCS_BUCKET: str = ""
     CDN_BASE_URL: str = ""
+    REDIS_URL: str = "redis://localhost:6379/0"
+    INTERNAL_TOKEN: str = ""
 
     class Config:
         env_file = ".env"
