@@ -16,8 +16,17 @@ uvicorn app.main:app --reload --port 8000
 # Frontend setup & dev server (port 5173)
 cd frontend && npm install && npm run dev
 
-# Reset database (no migrations, just delete and restart)
+# Reset local database (SQLite auto-creates schema on startup)
 rm -f qr_codes.db
+
+# Run migrations (required for PostgreSQL / production)
+alembic upgrade head
+
+# Create a new migration after editing models
+alembic revision --autogenerate -m "describe change"
+
+# Mark an existing prod DB as already at baseline (one-off, before first deploy)
+alembic stamp head
 
 # Test endpoints
 curl -X POST http://localhost:8000/v1/qr_code -H "Content-Type: application/json" -d '{"url": "https://example.com"}'
@@ -77,6 +86,12 @@ DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries fi
 
 ### Frontend (Vue 3 + TypeScript)
 Lives in `frontend/`. Vite dev server (port 5173) proxies `/v1`, `/static`, `/r` to the backend at port 8000 — this proxy config must stay in sync with actual backend routes. **Restart Vite after changing `vite.config.ts`** (proxy changes are not hot-reloaded). `shortUrl` in `QRCodeDisplay.vue` is hardcoded to `localhost:8000` — update this for production.
+
+### Schema Migrations
+Alembic is the source of truth for production schema. `alembic/env.py` reads `settings.DATABASE_URL` and imports `app.models` so `--autogenerate` sees all tables. The lifespan in `app/main.py` only runs `create_all` on SQLite — PostgreSQL must be migrated explicitly via `alembic upgrade head`. Tests still use `create_all` directly because they target a transient SQLite DB.
+
+### Click Stats Pipeline
+Per-redirect counter writes go to Redis (`qr:clicks:{YYYY-MM-DD-HH}` hash, field=token, value=count) instead of UPDATEing `qr_codes`. A scheduled `POST /internal/flush_clicks` (Cloud Scheduler, hourly) drains the previous-hour key into the `qr_click_stats` table via `flush_previous_hour` in `app/jobs/flush_clicks.py`. Flush is idempotent: rename-then-delete + `ON CONFLICT (qr_token, hour_bucket) DO UPDATE SET click_count = ... + EXCLUDED.click_count`. Auth on the endpoint uses an `X-Internal-Token` header against `settings.INTERNAL_TOKEN`.
 
 ### Testing
 Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `tests/conftest.py` overrides the `get_db` dependency so tests never touch the dev database. Each test gets a fresh schema via `create_all` / `drop_all`.
