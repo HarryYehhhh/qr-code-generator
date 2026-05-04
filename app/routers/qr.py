@@ -41,8 +41,12 @@ def list_all(db: Session = Depends(get_db)):
 
 
 @router.post("/qr_code", status_code=201, response_model=CreateQRCodeResponse)
-def create(request: CreateQRCodeRequest, db: Session = Depends(get_db)):
-    token = create_qr_code(db, request.url)
+def create(
+    request: CreateQRCodeRequest,
+    db: Session = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    token = create_qr_code(db, request.url, redis=redis)
     return CreateQRCodeResponse(qr_token=token)
 
 

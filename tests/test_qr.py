@@ -13,6 +13,11 @@ class TestCreateQRCode:
         resp = client.post("/v1/qr_code", json={"url": "https://例.com"})
         assert resp.status_code == 422
 
+    def test_create_pre_warms_redis_cache(self, client, fake_redis):
+        resp = client.post("/v1/qr_code", json={"url": "https://example.com"})
+        token = resp.json()["qr_token"]
+        assert fake_redis.get(f"qr:url:{token}") == b"https://example.com"
+
 
 class TestGetQRCode:
     def test_get_success(self, client):
