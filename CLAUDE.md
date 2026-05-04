@@ -70,7 +70,7 @@ QR Code Generator using FastAPI backend + Vue 3 / TypeScript frontend. Local dev
 DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries filter `status == 'active'`. Rows are never physically removed.
 
 ### Redirect Route
-`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Atomically increments `click_count` and updates `last_clicked_at` on each redirect. Registered **after** `/v1` router to avoid path conflicts.
+`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Reads URL from Redis (`qr:url:{token}`) — falls back to DB on cache miss and populates the cache. Click counting is async: fires `HINCRBY qr:clicks:{hour}` rather than touching `qr_codes`. `click_count` and `last_clicked_at` are populated by the hourly flush job (see Click Stats Pipeline). Registered **after** `/v1` router to avoid path conflicts.
 
 ### API Contracts
 - `POST /v1/qr_code` → `{"qr_token": "..."}` (201)
@@ -96,7 +96,7 @@ Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `
 ### Production Infrastructure (GCP)
 - **Cloud Run**: Stateless container, port 8080, single uvicorn process (no `--workers`)
 - **Cloud SQL**: PostgreSQL 15 via Cloud SQL Python Connector (`pg8000` driver), public IP. Selected when `INSTANCE_CONNECTION_NAME` env var is set; otherwise `DATABASE_URL` is used directly (Docker compose / Auth Proxy).
-- **Memorystore for Redis**: holds redirect URL cache, click counters, and image PNG bytes
+- **Memorystore for Redis**: holds redirect URL cache, click counters, and image PNG bytes. Lives in a VPC, so Cloud Run reaches it via a Serverless VPC Access connector (`--vpc-connector`).
 - **Artifact Registry**: Docker images stored in `asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/`
 
 ### Image Cache
@@ -121,18 +121,20 @@ gcloud run deploy qr-code-generator \
   --region asia-east1 \
   --max-instances=6 --min-instances=0 \
   --concurrency=80 --cpu=1 --memory=512Mi \
+  --vpc-connector=qr-connector \
   --service-account=qr-runtime@<PROJECT>.iam.gserviceaccount.com \
-  --set-env-vars=ENVIRONMENT=production,INSTANCE_CONNECTION_NAME=<PROJECT>:asia-east1:<INSTANCE>,DB_USER=qrapp,DB_NAME=qrcodes,CLOUD_SQL_IP_TYPE=PUBLIC \
+  --set-env-vars=ENVIRONMENT=production,INSTANCE_CONNECTION_NAME=<PROJECT>:asia-east1:<INSTANCE>,DB_USER=qrapp,DB_NAME=qrdb,CLOUD_SQL_IP_TYPE=PUBLIC,REDIS_URL=redis://<MEMORYSTORE_IP>:6379/0 \
   --set-secrets=DB_PASS=qr-db-pass:latest,SERVER_SECRET=qr-server-secret:latest,INTERNAL_TOKEN=qr-internal-token:latest
 ```
 - The Connector replaces Unix socket — **do not** pass `--add-cloudsql-instances`.
-- Service account needs IAM role `roles/cloudsql.client`.
-- DB password lives in Secret Manager.
+- Service account needs `roles/cloudsql.client` and `roles/redis.editor`.
+- DB password and `INTERNAL_TOKEN` live in Secret Manager.
+- See [README.md](README.md) for the full step-by-step deploy including Memorystore + VPC connector + Cloud Scheduler setup.
 
 ### Running migrations against production
 Use the [Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy) from a dev box / CI rather than the runtime Connector:
 ```bash
 cloud-sql-proxy <PROJECT>:asia-east1:<INSTANCE> &
-DATABASE_URL='postgresql+psycopg2://qrapp:***@127.0.0.1:5432/qrcodes' alembic upgrade head
+DATABASE_URL='postgresql+psycopg2://qrapp:***@127.0.0.1:5432/qrdb' alembic upgrade head
 ```
 This keeps `psycopg2-binary` in `requirements.txt` as the migration driver. Alembic's `env.py` errors out if `INSTANCE_CONNECTION_NAME` is set with a SQLite `DATABASE_URL` to catch operator mistakes.
