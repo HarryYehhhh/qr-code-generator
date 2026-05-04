@@ -7,7 +7,6 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/v1': 'http://localhost:8000',
-      '/static': 'http://localhost:8000',
       '/r': 'http://localhost:8000',
     },
   },

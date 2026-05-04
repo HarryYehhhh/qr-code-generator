@@ -53,27 +53,24 @@ gcloud run deploy qr-code-generator \
 
 ## Architecture
 
-QR Code Generator using FastAPI backend + Vue 3 / TypeScript frontend, with dual-environment support: SQLite + local files (local dev) and Cloud SQL PostgreSQL + Cloud Storage + CDN (production on Cloud Run).
+QR Code Generator using FastAPI backend + Vue 3 / TypeScript frontend. Local dev uses SQLite; production uses Cloud SQL PostgreSQL on Cloud Run. Image bytes are cached in Redis (no GCS / CDN — see Image Cache section).
 
 ### ENV Switch Pattern
-`ENVIRONMENT` in `app/config.py` controls all behavior switching:
-- **`"local"`**: SQLite DB, `LocalStorage` writes to disk, FastAPI StaticFiles mount at `/static`, image URLs use `BASE_URL/static/...`
-- **`"production"`**: Cloud SQL PostgreSQL via Unix socket, `GCSStorage` uploads to GCS bucket, image URLs use `CDN_BASE_URL/...`
-
-Storage backend is swapped via factory pattern in `app/storage/factory.py`. GCS import is **lazy** (inside the production branch) so local dev doesn't require `google-cloud-storage` to be installed. Database `connect_args` is also conditional — `check_same_thread=False` only applies to SQLite.
+`ENVIRONMENT` in `app/config.py` documents which backends are active:
+- **`"local"`**: SQLite DB
+- **`"production"`**: Cloud SQL PostgreSQL via Cloud SQL Python Connector (`INSTANCE_CONNECTION_NAME` env var triggers the Connector branch in `app/database.py`)
 
 ### Request Flow
 1. **Router** (`app/routers/qr.py`, prefix `/v1`) validates input via Pydantic schemas
 2. **Service layer** (`app/services/qr_service.py`) orchestrates business logic
 3. **Token service** generates Base62 tokens: `SHA-256(url + random_nonce + SERVER_SECRET)` → first 10 Base62 chars. Retries up to 5 times on UNIQUE constraint collision.
-4. **Image service** generates QR PNGs with customizable spec (dimension/color/border). Uses `spec_hash` as cache key — stored at `qr/{qr_token}/{spec_hash}.png`.
-5. **Storage layer** (`app/storage/`) abstracts file I/O behind `StorageBackend` interface with path-based methods (`save`, `get`, `delete`, `exists`).
+4. **Image service** (`app/services/image_service.py`) generates QR PNGs with customizable spec (dimension/color/border). Output bytes are cached in Redis directly — no disk / GCS.
 
 ### Soft Delete
 DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries filter `status == 'active'`. Rows are never physically removed.
 
 ### Redirect Route
-`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Atomically increments `click_count` and updates `last_clicked_at` on each redirect. Registered **after** `/v1` router to avoid path conflicts.
+`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Reads URL from Redis (`qr:url:{token}`) — falls back to DB on cache miss and populates the cache. Click counting is async: fires `HINCRBY qr:clicks:{hour}` rather than touching `qr_codes`. `click_count` and `last_clicked_at` are populated by the hourly flush job (see Click Stats Pipeline). Registered **after** `/v1` router to avoid path conflicts.
 
 ### API Contracts
 - `POST /v1/qr_code` → `{"qr_token": "..."}` (201)
@@ -81,11 +78,11 @@ DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries fi
 - `GET /v1/qr_code/{token}` → `{url, click_count, status, created_at}` (200) or 410 if deleted
 - `PUT /v1/qr_code/{token}` → 204
 - `DELETE /v1/qr_code/{token}` → 204 (soft delete)
-- `GET /v1/qr_code_image/{token}?dimension=&color=&border=` → `{"image_location": "..."}` (200)
+- `GET /v1/qr_code_image/{token}?dimension=&color=&border=` → `image/png` bytes (200), `Cache-Control: public, max-age=300, must-revalidate`
 - `GET /r/{token}` → 302 redirect
 
 ### Frontend (Vue 3 + TypeScript)
-Lives in `frontend/`. Vite dev server (port 5173) proxies `/v1`, `/static`, `/r` to the backend at port 8000 — this proxy config must stay in sync with actual backend routes. **Restart Vite after changing `vite.config.ts`** (proxy changes are not hot-reloaded). `shortUrl` in `QRCodeDisplay.vue` is hardcoded to `localhost:8000` — update this for production.
+Lives in `frontend/`. Vite dev server (port 5173) proxies `/v1` and `/r` to the backend at port 8000 — this proxy config must stay in sync with actual backend routes. **Restart Vite after changing `vite.config.ts`** (proxy changes are not hot-reloaded). Image API now returns PNG bytes directly, so `<img :src="getQRCodeImageUrl(token)">` is wired straight to the backend endpoint. `shortUrl` in `QRCodeDisplay.vue` is hardcoded to `localhost:8000` — update this for production.
 
 ### Schema Migrations
 Alembic is the source of truth for production schema. `alembic/env.py` reads `settings.DATABASE_URL` and imports `app.models` so `--autogenerate` sees all tables. The lifespan in `app/main.py` only runs `create_all` on SQLite — PostgreSQL must be migrated explicitly via `alembic upgrade head`. Tests still use `create_all` directly because they target a transient SQLite DB.
@@ -99,9 +96,16 @@ Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `
 ### Production Infrastructure (GCP)
 - **Cloud Run**: Stateless container, port 8080, single uvicorn process (no `--workers`)
 - **Cloud SQL**: PostgreSQL 15 via Cloud SQL Python Connector (`pg8000` driver), public IP. Selected when `INSTANCE_CONNECTION_NAME` env var is set; otherwise `DATABASE_URL` is used directly (Docker compose / Auth Proxy).
-- **Cloud Storage**: QR images uploaded to GCS bucket
-- **CDN**: Serves images publicly from GCS via Cloud CDN
+- **Memorystore for Redis**: holds redirect URL cache, click counters, and image PNG bytes. Lives in a VPC, so Cloud Run reaches it via a Serverless VPC Access connector (`--vpc-connector`).
 - **Artifact Registry**: Docker images stored in `asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/`
+
+### Image Cache
+QR PNG bytes are cached directly in Redis — no GCS, no disk, no CDN.
+- Key: `qr:img:{spec_hash}:{url_hash16}` (content-addressed; same `(url, spec)` always maps to byte-identical PNG)
+- TTL: 7 days
+- On cache miss: regenerate via `generate_qr_image(url, image_spec)` and `setex`. QR generation is ~10-20 ms CPU.
+- API response sets `Cache-Control: public, max-age=300, must-revalidate` — short TTL because the response URL is token-based, not content-addressed, so URL updates would otherwise serve stale browser cache.
+- Recommend `maxmemory-policy=allkeys-lru` on Memorystore. Average PNG ~1-3 KB, so 50 K cached entries ≈ 150 MB.
 
 ### Connection Pool
 Sized for `db-f1-micro` (~25 max_connections):
@@ -117,18 +121,20 @@ gcloud run deploy qr-code-generator \
   --region asia-east1 \
   --max-instances=6 --min-instances=0 \
   --concurrency=80 --cpu=1 --memory=512Mi \
+  --vpc-connector=qr-connector \
   --service-account=qr-runtime@<PROJECT>.iam.gserviceaccount.com \
-  --set-env-vars=ENVIRONMENT=production,INSTANCE_CONNECTION_NAME=<PROJECT>:asia-east1:<INSTANCE>,DB_USER=qrapp,DB_NAME=qrcodes,CLOUD_SQL_IP_TYPE=PUBLIC \
+  --set-env-vars=ENVIRONMENT=production,INSTANCE_CONNECTION_NAME=<PROJECT>:asia-east1:<INSTANCE>,DB_USER=qrapp,DB_NAME=qrdb,CLOUD_SQL_IP_TYPE=PUBLIC,REDIS_URL=redis://<MEMORYSTORE_IP>:6379/0 \
   --set-secrets=DB_PASS=qr-db-pass:latest,SERVER_SECRET=qr-server-secret:latest,INTERNAL_TOKEN=qr-internal-token:latest
 ```
 - The Connector replaces Unix socket — **do not** pass `--add-cloudsql-instances`.
-- Service account needs IAM role `roles/cloudsql.client`.
-- DB password lives in Secret Manager.
+- Service account needs `roles/cloudsql.client` and `roles/redis.editor`.
+- DB password and `INTERNAL_TOKEN` live in Secret Manager.
+- See [README.md](README.md) for the full step-by-step deploy including Memorystore + VPC connector + Cloud Scheduler setup.
 
 ### Running migrations against production
 Use the [Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy) from a dev box / CI rather than the runtime Connector:
 ```bash
 cloud-sql-proxy <PROJECT>:asia-east1:<INSTANCE> &
-DATABASE_URL='postgresql+psycopg2://qrapp:***@127.0.0.1:5432/qrcodes' alembic upgrade head
+DATABASE_URL='postgresql+psycopg2://qrapp:***@127.0.0.1:5432/qrdb' alembic upgrade head
 ```
 This keeps `psycopg2-binary` in `requirements.txt` as the migration driver. Alembic's `env.py` errors out if `INSTANCE_CONNECTION_NAME` is set with a SQLite `DATABASE_URL` to catch operator mistakes.

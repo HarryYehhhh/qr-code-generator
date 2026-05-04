@@ -2,7 +2,7 @@
 import { ref, onMounted } from "vue";
 import QRCodeCreator from "./components/QRCodeCreator.vue";
 import QRCodeDisplay from "./components/QRCodeDisplay.vue";
-import { listQRCodes, getQRCodeImage } from "./api/qrCode";
+import { listQRCodes, getQRCodeImageUrl } from "./api/qrCode";
 
 interface QRCodeEntry {
   token: string;
@@ -17,19 +17,11 @@ onMounted(async () => {
   loadingList.value = true;
   try {
     const list = await listQRCodes();
-    const loaded = await Promise.all(
-      list.map(async (item) => {
-        let imageUrl = "";
-        if (item.status === "active") {
-          try {
-            const { image_location } = await getQRCodeImage(item.qr_token);
-            imageUrl = image_location;
-          } catch { /* image unavailable */ }
-        }
-        return { token: item.qr_token, imageUrl, url: item.url };
-      })
-    );
-    entries.value = loaded;
+    entries.value = list.map((item) => ({
+      token: item.qr_token,
+      imageUrl: item.status === "active" ? getQRCodeImageUrl(item.qr_token) : "",
+      url: item.url,
+    }));
   } catch {
     // silently fail — user can still create new ones
   } finally {

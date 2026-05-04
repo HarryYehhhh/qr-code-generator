@@ -8,7 +8,6 @@ from app.schemas import (
     CreateQRCodeRequest,
     CreateQRCodeResponse,
     GetQRCodeResponse,
-    QRCodeImageResponse,
     QRCodeListItem,
     UpdateQRCodeRequest,
 )
@@ -50,19 +49,24 @@ def create(
     return CreateQRCodeResponse(qr_token=token)
 
 
-@router.get("/qr_code_image/{qr_token}", response_model=QRCodeImageResponse)
+@router.get("/qr_code_image/{qr_token}")
 def get_image(
     qr_token: str,
     dimension: int = Query(default=256, ge=32, le=2048),
     color: str = Query(default="#000000", pattern=r"^#[0-9a-fA-F]{6}$"),
     border: int = Query(default=4, ge=0, le=20),
     db: Session = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     image_spec = {"dimension": dimension, "color": color, "border": border}
-    location = get_or_generate_image(db, qr_token, image_spec)
-    if not location:
+    image_bytes = get_or_generate_image(db, qr_token, image_spec, redis)
+    if image_bytes is None:
         raise HTTPException(status_code=404, detail="QR code not found")
-    return QRCodeImageResponse(image_location=location)
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300, must-revalidate"},
+    )
 
 
 @router.get("/qr_code/{qr_token}", response_model=GetQRCodeResponse)

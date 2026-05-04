@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { createQRCode, getQRCodeImage } from "../api/qrCode";
+import { createQRCode, getQRCodeImageUrl } from "../api/qrCode";
 
 const emit = defineEmits<{
   created: [token: string, imageUrl: string, url: string];
@@ -21,8 +21,7 @@ async function handleSubmit() {
   loading.value = true;
   try {
     const { qr_token } = await createQRCode(trimmed);
-    const { image_location } = await getQRCodeImage(qr_token);
-    emit("created", qr_token, image_location, trimmed);
+    emit("created", qr_token, getQRCodeImageUrl(qr_token), trimmed);
     url.value = "";
   } catch (e: any) {
     error.value = e.message || "Failed to create QR code";

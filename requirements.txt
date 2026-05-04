@@ -6,7 +6,6 @@ pydantic-settings==2.13.1
 qrcode[pil]==8.2
 python-dotenv==1.2.2
 psycopg2-binary==2.9.10
-google-cloud-storage==2.19.0
 cloud-sql-python-connector[pg8000]==1.13.0
 redis==5.2.1
 pytest==8.3.5
