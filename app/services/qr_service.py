@@ -16,7 +16,7 @@ storage = get_storage()
 MAX_RETRIES = 5
 
 
-def create_qr_code(db: Session, url: str) -> str:
+def create_qr_code(db: Session, url: str, redis: Redis | None = None) -> str:
     for _ in range(MAX_RETRIES):
         token = generate_qr_token(url, settings.SERVER_SECRET)
         qr = QRCode(url=url, qr_token=token)
@@ -24,6 +24,8 @@ def create_qr_code(db: Session, url: str) -> str:
             db.add(qr)
             db.flush()
             db.commit()
+            if redis:
+                redis.setex(f"qr:url:{token}", URL_CACHE_TTL, url)
             return token
         except IntegrityError:
             db.rollback()
