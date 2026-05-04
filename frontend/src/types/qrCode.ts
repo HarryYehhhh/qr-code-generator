@@ -16,7 +16,3 @@ export interface QRCodeListItem {
   status: string;
   created_at: string;
 }
-
-export interface QRCodeImageResponse {
-  image_location: string;
-}

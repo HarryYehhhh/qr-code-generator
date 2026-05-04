@@ -6,7 +6,6 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from redis import Redis
 from sqlalchemy.orm import Session
 
@@ -91,10 +90,3 @@ def redirect(
 def _record_click(redis: Redis, token: str) -> None:
     hour = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
     redis.hincrby(f"qr:clicks:{hour}", token, 1)
-
-
-if settings.ENVIRONMENT == "local":
-    import os
-
-    os.makedirs(settings.STORAGE_PATH, exist_ok=True)
-    app.mount("/static", StaticFiles(directory=settings.STORAGE_PATH), name="static")

@@ -1,7 +1,6 @@
 import type {
   CreateQRCodeResponse,
   GetQRCodeResponse,
-  QRCodeImageResponse,
   QRCodeListItem,
 } from "../types/qrCode";
 
@@ -45,22 +44,17 @@ export async function getQRCode(
   return { data, status: 200 };
 }
 
-export async function getQRCodeImage(
+export function getQRCodeImageUrl(
   token: string,
   options?: { dimension?: number; color?: string; border?: number }
-): Promise<QRCodeImageResponse> {
+): string {
   const params = new URLSearchParams();
   if (options?.dimension) params.set("dimension", String(options.dimension));
   if (options?.color) params.set("color", options.color);
   if (options?.border !== undefined) params.set("border", String(options.border));
 
   const qs = params.toString() ? `?${params.toString()}` : "";
-  const resp = await fetch(`${BASE_URL}/v1/qr_code_image/${token}${qs}`);
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: "Request failed" }));
-    throw new Error(err.detail || `HTTP ${resp.status}`);
-  }
-  return resp.json();
+  return `${BASE_URL}/v1/qr_code_image/${token}${qs}`;
 }
 
 export interface RedirectTestResult {

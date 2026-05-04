@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, timezone
 
 from redis import Redis
@@ -8,11 +9,10 @@ from app.config import settings
 from app.models import QRCode
 from app.services.image_service import compute_spec_hash, generate_qr_image
 from app.services.token_service import generate_qr_token
-from app.storage.factory import get_storage
 
 URL_CACHE_TTL = 86400  # 24 h
+IMG_CACHE_TTL = 7 * 86400  # 7 d
 
-storage = get_storage()
 MAX_RETRIES = 5
 
 
@@ -79,18 +79,31 @@ def delete_qr_code(db: Session, qr_token: str, redis: Redis | None = None) -> bo
     return True
 
 
-def get_or_generate_image(db: Session, qr_token: str, image_spec: dict) -> str | None:
-    qr = get_qr_code(db, qr_token)
-    if not qr:
-        return None
-
+def _img_cache_key(url: str, image_spec: dict) -> str:
     spec_hash = compute_spec_hash(image_spec)
-    path = f"qr/{qr_token}/{spec_hash}.png"
+    url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
+    return f"qr:img:{spec_hash}:{url_hash}"
 
-    if not storage.exists(path):
-        image_data = generate_qr_image(qr.url, image_spec)
-        storage.save(path, image_data)
 
-    if settings.CDN_BASE_URL:
-        return f"{settings.CDN_BASE_URL}/{path}"
-    return f"{settings.BASE_URL}/static/{path}"
+def get_or_generate_image(
+    db: Session, qr_token: str, image_spec: dict, redis: Redis
+) -> bytes | None:
+    url_key = f"qr:url:{qr_token}"
+    cached_url = redis.get(url_key)
+    if cached_url:
+        url = cached_url.decode()
+    else:
+        qr = get_qr_code(db, qr_token)
+        if not qr:
+            return None
+        url = qr.url
+        redis.setex(url_key, URL_CACHE_TTL, url)
+
+    img_key = _img_cache_key(url, image_spec)
+    cached_img = redis.get(img_key)
+    if cached_img:
+        return cached_img
+
+    image_bytes = generate_qr_image(url, image_spec)
+    redis.setex(img_key, IMG_CACHE_TTL, image_bytes)
+    return image_bytes

@@ -75,12 +75,34 @@ class TestQRCodeImage:
         token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
         resp = client.get(f"/v1/qr_code_image/{token}?dimension=128&color=%23ff0000&border=2")
         assert resp.status_code == 200
-        assert "image_location" in resp.json()
-        assert token in resp.json()["image_location"]
+        assert resp.headers["content-type"] == "image/png"
+        # PNG magic bytes
+        assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
 
     def test_image_not_found(self, client):
         resp = client.get("/v1/qr_code_image/nonexistent")
         assert resp.status_code == 404
+
+    def test_image_cache_hit(self, client, fake_redis):
+        token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
+
+        resp1 = client.get(f"/v1/qr_code_image/{token}?dimension=128")
+        resp2 = client.get(f"/v1/qr_code_image/{token}?dimension=128")
+
+        assert resp1.content == resp2.content
+        # at least one image cache key exists
+        keys = list(fake_redis.scan_iter(match="qr:img:*"))
+        assert len(keys) >= 1
+
+    def test_image_regenerates_after_url_update(self, client):
+        token = client.post("/v1/qr_code", json={"url": "https://old.com"}).json()["qr_token"]
+        resp1 = client.get(f"/v1/qr_code_image/{token}?dimension=128")
+
+        client.put(f"/v1/qr_code/{token}", json={"url": "https://new.com"})
+        resp2 = client.get(f"/v1/qr_code_image/{token}?dimension=128")
+
+        # different URL → different encoded QR → different bytes
+        assert resp1.content != resp2.content
 
 
 class TestRedirect:
