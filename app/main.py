@@ -11,7 +11,7 @@ from redis import Redis
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import Base, engine, get_db
+from app.database import Base, close_connector, engine, get_db
 from app.dependencies import get_redis
 from app.routers import internal as internal_router
 from app.routers import qr
@@ -24,7 +24,10 @@ async def lifespan(app: FastAPI):
     # on `alembic upgrade head` so production schema stays version-controlled
     if settings.DATABASE_URL.startswith("sqlite"):
         Base.metadata.create_all(bind=engine)
-    yield
+    try:
+        yield
+    finally:
+        close_connector()
 
 
 app = FastAPI(title="QR Code Generator", lifespan=lifespan)

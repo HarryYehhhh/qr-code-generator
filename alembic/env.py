@@ -5,8 +5,17 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 from app.config import settings
-from app.database import Base
-import app.models  # noqa: F401  ensure models are registered with Base.metadata
+
+# Guard runs before importing app.database to avoid triggering the Connector
+# branch on a misconfigured run (e.g. dev forgot to set Auth Proxy DATABASE_URL).
+if settings.INSTANCE_CONNECTION_NAME and settings.DATABASE_URL.startswith("sqlite"):
+    raise RuntimeError(
+        "INSTANCE_CONNECTION_NAME is set but DATABASE_URL is sqlite. "
+        "Run alembic via Cloud SQL Auth Proxy with a Postgres DATABASE_URL instead."
+    )
+
+from app.database import Base  # noqa: E402
+import app.models  # noqa: F401, E402  ensure models are registered with Base.metadata
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)

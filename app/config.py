@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     CDN_BASE_URL: str = ""
     REDIS_URL: str = "redis://localhost:6379/0"
     INTERNAL_TOKEN: str = ""
+    INSTANCE_CONNECTION_NAME: str = ""
+    DB_USER: str = ""
+    DB_PASS: str = ""
+    DB_NAME: str = ""
+    CLOUD_SQL_IP_TYPE: str = "PUBLIC"
 
     class Config:
         env_file = ".env"

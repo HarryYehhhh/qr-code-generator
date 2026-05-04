@@ -97,11 +97,38 @@ Per-redirect counter writes go to Redis (`qr:clicks:{YYYY-MM-DD-HH}` hash, field
 Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `tests/conftest.py` overrides the `get_db` dependency so tests never touch the dev database. Each test gets a fresh schema via `create_all` / `drop_all`.
 
 ### Production Infrastructure (GCP)
-- **Cloud Run**: Stateless container, port 8080, env vars set via `--update-env-vars`
-- **Cloud SQL**: PostgreSQL 15 via Unix socket (`/cloudsql/<connection_name>`)
+- **Cloud Run**: Stateless container, port 8080, single uvicorn process (no `--workers`)
+- **Cloud SQL**: PostgreSQL 15 via Cloud SQL Python Connector (`pg8000` driver), public IP. Selected when `INSTANCE_CONNECTION_NAME` env var is set; otherwise `DATABASE_URL` is used directly (Docker compose / Auth Proxy).
 - **Cloud Storage**: QR images uploaded to GCS bucket
 - **CDN**: Serves images publicly from GCS via Cloud CDN
 - **Artifact Registry**: Docker images stored in `asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/`
 
-### Deployment Gotcha (zsh)
-When setting `DATABASE_URL` via `gcloud run --set-env-vars`, use `^||^` custom delimiter or single quotes to prevent zsh from interpreting `?` in the connection string. See README.md for the full deploy command.
+### Connection Pool
+Sized for `db-f1-micro` (~25 max_connections):
+- `pool_size=1, max_overflow=2, pool_timeout=10, pool_recycle=300, pool_pre_ping=True`
+- Per-instance budget: 3 connections
+- **Cloud Run `--max-instances=6`** → max 18 conn for app, leaves ~7 for admin / hourly flush job / psql
+- The Connector is a lazy module-level singleton in `app/database.py`. **Never add `--workers > 1`** to uvicorn without moving Connector init into FastAPI lifespan — the Connector's background thread does not survive `fork()`.
+
+### Recommended Cloud Run deploy flags
+```bash
+gcloud run deploy qr-code-generator \
+  --image asia-east1-docker.pkg.dev/<PROJECT>/qr-repo/qr-code-generator \
+  --region asia-east1 \
+  --max-instances=6 --min-instances=0 \
+  --concurrency=80 --cpu=1 --memory=512Mi \
+  --service-account=qr-runtime@<PROJECT>.iam.gserviceaccount.com \
+  --set-env-vars=ENVIRONMENT=production,INSTANCE_CONNECTION_NAME=<PROJECT>:asia-east1:<INSTANCE>,DB_USER=qrapp,DB_NAME=qrcodes,CLOUD_SQL_IP_TYPE=PUBLIC \
+  --set-secrets=DB_PASS=qr-db-pass:latest,SERVER_SECRET=qr-server-secret:latest,INTERNAL_TOKEN=qr-internal-token:latest
+```
+- The Connector replaces Unix socket — **do not** pass `--add-cloudsql-instances`.
+- Service account needs IAM role `roles/cloudsql.client`.
+- DB password lives in Secret Manager.
+
+### Running migrations against production
+Use the [Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy) from a dev box / CI rather than the runtime Connector:
+```bash
+cloud-sql-proxy <PROJECT>:asia-east1:<INSTANCE> &
+DATABASE_URL='postgresql+psycopg2://qrapp:***@127.0.0.1:5432/qrcodes' alembic upgrade head
+```
+This keeps `psycopg2-binary` in `requirements.txt` as the migration driver. Alembic's `env.py` errors out if `INSTANCE_CONNECTION_NAME` is set with a SQLite `DATABASE_URL` to catch operator mistakes.
