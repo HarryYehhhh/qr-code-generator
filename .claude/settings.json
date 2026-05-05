@@ -7,6 +7,18 @@
     ]
   },
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git push *)",
+            "command": "cmd=$(jq -r '.tool_input.command // \"\"'); if echo \"$cmd\" | grep -qE 'git push (-u|--set-upstream) origin '; then branch=$(echo \"$cmd\" | awk '{print $NF}'); if [ \"$branch\" != \"main\" ]; then gh pr view --head \"$branch\" 2>/dev/null || gh pr create --base main --head \"$branch\" --fill 2>/dev/null || true; fi; fi"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
