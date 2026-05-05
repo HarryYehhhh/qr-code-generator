@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.services.url_validator import validate_safe_url
+
 
 class CreateQRCodeRequest(BaseModel):
     url: str = Field(..., max_length=2048)
@@ -13,6 +15,7 @@ class CreateQRCodeRequest(BaseModel):
             raise ValueError("URL must start with http:// or https://")
         if not v.isascii():
             raise ValueError("URL must contain only ASCII characters")
+        validate_safe_url(v)
         return v
 
 
@@ -45,6 +48,7 @@ class UpdateQRCodeRequest(BaseModel):
             raise ValueError("URL must start with http:// or https://")
         if not v.isascii():
             raise ValueError("URL must contain only ASCII characters")
+        validate_safe_url(v)
         return v
 
 
