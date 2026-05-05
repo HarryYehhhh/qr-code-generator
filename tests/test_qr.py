@@ -18,6 +18,26 @@ class TestCreateQRCode:
         token = resp.json()["qr_token"]
         assert fake_redis.get(f"qr:url:{token}") == b"https://example.com"
 
+    def test_create_rejects_userinfo(self, client):
+        resp = client.post("/v1/qr_code", json={"url": "http://google.com@evil.com/"})
+        assert resp.status_code == 422
+
+    def test_create_rejects_localhost(self, client):
+        resp = client.post("/v1/qr_code", json={"url": "http://localhost/x"})
+        assert resp.status_code == 422
+
+    def test_create_rejects_private_ip(self, client):
+        resp = client.post("/v1/qr_code", json={"url": "http://192.168.1.1/x"})
+        assert resp.status_code == 422
+
+    def test_create_rejects_loopback_ip(self, client):
+        resp = client.post("/v1/qr_code", json={"url": "http://127.0.0.1/x"})
+        assert resp.status_code == 422
+
+    def test_create_allows_public_ip(self, client):
+        resp = client.post("/v1/qr_code", json={"url": "http://8.8.8.8/"})
+        assert resp.status_code == 201
+
 
 class TestGetQRCode:
     def test_get_success(self, client):
@@ -53,6 +73,11 @@ class TestUpdateQRCode:
     def test_update_not_found(self, client):
         resp = client.put("/v1/qr_code/nonexistent", json={"url": "https://new.com"})
         assert resp.status_code == 404
+
+    def test_update_rejects_userinfo(self, client):
+        token = client.post("/v1/qr_code", json={"url": "https://old.com"}).json()["qr_token"]
+        resp = client.put(f"/v1/qr_code/{token}", json={"url": "http://google.com@evil.com/"})
+        assert resp.status_code == 422
 
 
 class TestDeleteQRCode:
