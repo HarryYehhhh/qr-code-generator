@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push *)",
+      "Bash(git push)",
+      "WebFetch(domain:api.github.com)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git *)",
+            "command": "cmd=$(jq -r '.tool_input.command // \"\"'); echo \"$cmd\" | grep -qE 'git[[:space:]]+(push[[:space:]]+.*[[:space:]]main$|push[[:space:]]+.*[[:space:]]main[[:space:]]|checkout[[:space:]]+main$|reset[[:space:]]+--hard.*[[:space:]]main)' && printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Direct operations on main branch are blocked. Use a feature branch and open a PR.\"}}\\n' || true"
+          }
+        ]
+      }
+    ]
+  }
+}
