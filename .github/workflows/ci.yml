@@ -42,7 +42,16 @@ jobs:
     name: Auto-merge claude/* PR
     needs: [backend-test, frontend-build]
     runs-on: ubuntu-latest
-    if: startsWith(github.head_ref, 'claude/')
+    if: |
+      startsWith(github.head_ref, 'claude/') ||
+      startsWith(github.head_ref, 'feat/') ||
+      startsWith(github.head_ref, 'fix/') ||
+      startsWith(github.head_ref, 'docs/') ||
+      startsWith(github.head_ref, 'style/') ||
+      startsWith(github.head_ref, 'refactor/') ||
+      startsWith(github.head_ref, 'perf/') ||
+      startsWith(github.head_ref, 'test/') ||
+      startsWith(github.head_ref, 'chore/')
     permissions:
       contents: write
       pull-requests: write

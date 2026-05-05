@@ -5,18 +5,22 @@ from pydantic import BaseModel, Field, field_validator
 from app.services.url_validator import validate_safe_url
 
 
+def _validate_url_field(v: str) -> str:
+    if not v.startswith(("http://", "https://")):
+        raise ValueError("URL must start with http:// or https://")
+    if not v.isascii():
+        raise ValueError("URL must contain only ASCII characters")
+    validate_safe_url(v)
+    return v
+
+
 class CreateQRCodeRequest(BaseModel):
     url: str = Field(..., max_length=2048)
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("URL must start with http:// or https://")
-        if not v.isascii():
-            raise ValueError("URL must contain only ASCII characters")
-        validate_safe_url(v)
-        return v
+        return _validate_url_field(v)
 
 
 class CreateQRCodeResponse(BaseModel):
@@ -44,12 +48,7 @@ class UpdateQRCodeRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("URL must start with http:// or https://")
-        if not v.isascii():
-            raise ValueError("URL must contain only ASCII characters")
-        validate_safe_url(v)
-        return v
+        return _validate_url_field(v)
 
 
 class ImageSpec(BaseModel):
