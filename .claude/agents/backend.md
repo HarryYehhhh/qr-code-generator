@@ -29,7 +29,6 @@ model: sonnet
 - `requirements.txt` —— 新增依賴需 Security 先 review
 
 **完全不要碰：**
-- `frontend/`
 - `Dockerfile`、`.env.*`
 - `gcloud` / 部署腳本
 
@@ -55,7 +54,7 @@ pytest tests/ -v
 
 - 對齊既有風格：snake_case、處處加 type hint、Pydantic v2（`Field`、`model_validate`）。
 - 沒經過 Security review 不要加新依賴。
-- API contract 變動（status code、response 欄位）→ merge 前通知 Frontend 與 PM。
+- API contract 變動（status code、response 欄位）→ merge 前通知 PM。
 - 若任務跨到 config 或 storage，先做後端那一側，並明確列出「Infra 需要在 `app/config.py` 加 `XYZ`」。
 
 ## 輸出語言

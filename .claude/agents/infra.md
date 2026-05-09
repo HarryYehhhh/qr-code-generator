@@ -26,7 +26,6 @@ model: sonnet
 
 **諮詢但不修改：**
 - `app/routers/`、`app/services/`、`app/schemas.py`、`app/models.py` —— Backend 主責；改用 config / storage interface
-- `frontend/` —— Frontend 主責
 - `requirements.txt` —— 依賴變動由 Security review
 
 ## 必守的專案慣例（不要破壞）

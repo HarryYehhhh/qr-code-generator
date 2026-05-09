@@ -18,11 +18,9 @@ model: sonnet
 **主責：**
 - `tests/` 目錄下所有 pytest 檔案
 - `tests/conftest.py` —— fixture、dependency override、隔離 test DB
-- 未來的前端 test 檔案（若導入時）
 
 **諮詢但不修改：**
 - `app/` 業務邏輯——若 test 因 bug 失敗，先寫一個會 fail 的 test，再請 Backend 修
-- `frontend/src/`——若未來導入前端 test infra，可以建立 scaffold，但不要動 component
 
 **完全不要碰：**
 - 為了讓 test 通過而改 production code——若 test 難寫，可能是 code 設計有問題，浮出來討論

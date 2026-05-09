@@ -13,9 +13,6 @@ cp .env.example .env
 # Run backend dev server
 uvicorn app.main:app --reload --port 8000
 
-# Frontend setup & dev server (port 5173)
-cd frontend && npm install && npm run dev
-
 # Reset local database (SQLite auto-creates schema on startup)
 rm -f qr_codes.db
 
@@ -53,7 +50,7 @@ gcloud run deploy qr-code-generator \
 
 ## Architecture
 
-QR Code Generator using FastAPI backend + Vue 3 / TypeScript frontend. Local dev uses SQLite; production uses Cloud SQL PostgreSQL on Cloud Run. Image bytes are cached in Redis (no GCS / CDN — see Image Cache section).
+QR Code Generator using FastAPI backend (API-only, no frontend). Local dev uses SQLite; production uses Cloud SQL PostgreSQL on Cloud Run. Image bytes are cached in Redis (no GCS / CDN — see Image Cache section).
 
 ### ENV Switch Pattern
 `ENVIRONMENT` in `app/config.py` documents which backends are active:
@@ -80,9 +77,6 @@ DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries fi
 - `DELETE /v1/qr_code/{token}` → 204 (soft delete)
 - `GET /v1/qr_code_image/{token}?dimension=&color=&border=` → `image/png` bytes (200), `Cache-Control: public, max-age=300, must-revalidate`
 - `GET /r/{token}` → 302 redirect
-
-### Frontend (Vue 3 + TypeScript)
-Lives in `frontend/`. Vite dev server (port 5173) proxies `/v1` and `/r` to the backend at port 8000 — this proxy config must stay in sync with actual backend routes. **Restart Vite after changing `vite.config.ts`** (proxy changes are not hot-reloaded). Image API now returns PNG bytes directly, so `<img :src="getQRCodeImageUrl(token)">` is wired straight to the backend endpoint. `shortUrl` in `QRCodeDisplay.vue` is hardcoded to `localhost:8000` — update this for production.
 
 ### Schema Migrations
 Alembic is the source of truth for production schema. `alembic/env.py` reads `settings.DATABASE_URL` and imports `app.models` so `--autogenerate` sees all tables. The lifespan in `app/main.py` only runs `create_all` on SQLite — PostgreSQL must be migrated explicitly via `alembic upgrade head`. Tests still use `create_all` directly because they target a transient SQLite DB.

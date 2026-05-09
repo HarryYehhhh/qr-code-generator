@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     CLOUD_SQL_IP_TYPE: str = "PUBLIC"
 
     class Config:
-        env_file = ".env"
+        env_file = "env/.env"
 
 
 settings = Settings()

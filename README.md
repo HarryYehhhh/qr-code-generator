@@ -1,6 +1,6 @@
 # QR Code Generator
 
-A full-stack QR code management service. Vue 3 frontend + FastAPI backend with dynamic redirect links, click tracking, and customisable QR images. Redis-backed for fast URL cache, async click counters, and PNG byte caching. Local dev runs on SQLite; production runs on Cloud Run + Cloud SQL + Memorystore.
+A QR code management API service. FastAPI backend with dynamic redirect links, click tracking, and customisable QR images. Redis-backed for fast URL cache, async click counters, and PNG byte caching. Local dev runs on SQLite; production runs on Cloud Run + Cloud SQL + Memorystore.
 
 ## Tech Stack
 
@@ -14,24 +14,18 @@ A full-stack QR code management service. Vue 3 frontend + FastAPI backend with d
 - **Cache & async work**: Redis — URL cache, hourly click counter, PNG byte cache
 - **Deployment**: Docker + Cloud Run
 
-**Frontend**
-- **Framework**: Vue 3 + TypeScript
-- **Build tool**: Vite
-
 ## Architecture
 
 ### Local Development
 
 ```mermaid
 graph LR
-    Browser[Browser :5173]
-    Vite[Vite Dev Server]
+    Client[Client]
     API[FastAPI :8000]
     DB[(SQLite)]
     Redis[(Redis :6379)]
 
-    Browser -->|Vue app| Vite
-    Vite -->|proxy /v1, /r| API
+    Client -->|API request| API
     API -->|metadata| DB
     API -->|URL cache, clicks, PNG bytes| Redis
 ```
@@ -88,36 +82,156 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --reload --port 8000
-
-# Frontend (separate terminal)
-cd frontend && npm install && npm run dev
-# Open http://localhost:5173
 ```
 
-SQLite auto-creates the schema on first boot. For PostgreSQL, run `alembic upgrade head` instead.
+SQLite auto-creates the schema on first boot. For PostgreSQL, run `alembic upgrade head` first (see [Schema Migrations](#schema-migrations-alembic)).
 
-API smoke:
+For API smoke tests and full E2E flows, see [Testing](#testing).
+
+## Schema Migrations (Alembic)
+
+Alembic is the **source of truth** for database schema in PostgreSQL environments. Migration files live in `alembic/versions/`.
+
+### Why Alembic matters
+
+| Environment | Schema management | Notes |
+|---|---|---|
+| **SQLite (default local)** | `create_all` on startup | Auto-creates tables; no migration needed |
+| **PostgreSQL (local Docker / production)** | `alembic upgrade head` | Must run manually before first request |
+| **pytest** | `create_all` / `drop_all` per test | Uses transient SQLite; no migration needed |
+
+If you use PostgreSQL locally (via Docker Compose), you **must** run migrations — the app will not auto-create tables.
+
+### Common commands
 
 ```bash
-curl -X POST http://localhost:8000/v1/qr_code \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com"}'
-# → {"qr_token": "aBcDeFgHiJ"}
+# Apply all pending migrations
+alembic upgrade head
 
-curl -o qr.png "http://localhost:8000/v1/qr_code_image/aBcDeFgHiJ?dimension=256"
-# → PNG bytes saved to qr.png
+# Create a new migration after editing app/models.py
+alembic revision --autogenerate -m "describe change"
 
-curl -L http://localhost:8000/r/aBcDeFgHiJ
-# → 302 → https://example.com
+# Mark an existing DB as already at a specific revision (skip running DDL)
+alembic stamp <revision>
+
+# View current migration status
+alembic current
+
+# View migration history
+alembic history
+```
+
+### First-time setup for an existing PostgreSQL DB
+
+If the DB already has `qr_codes` table (e.g. created by an older version), Alembic will fail with `DuplicateTable`. Fix:
+
+```bash
+# Tell Alembic the baseline migration is already applied
+alembic stamp 0001_baseline
+
+# Then apply remaining migrations
+alembic upgrade head
 ```
 
 ## Testing
+
+### Unit tests (pytest)
 
 ```bash
 pytest tests/ -v
 ```
 
 Uses FastAPI `TestClient` + isolated SQLite test DB + `fakeredis`. No GCP credentials required.
+
+### Local E2E testing (SQLite)
+
+Simplest path — no Docker needed (except Redis):
+
+```bash
+# 1. Start Redis
+docker run -d -p 6379:6379 --name qr-redis redis:7-alpine
+
+# 2. Use default .env (SQLite + Redis on 6379)
+cp .env.example .env
+
+# 3. Start server (SQLite auto-creates tables)
+uvicorn app.main:app --reload --port 8000
+
+# 4. Create a QR code
+curl -s -X POST http://localhost:8000/v1/qr_code \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+# → {"qr_token": "aBcDeFgHiJ"}
+
+# 5. Get QR image
+curl -s -o qr.png "http://localhost:8000/v1/qr_code_image/aBcDeFgHiJ?dimension=256"
+# → PNG saved to qr.png (image bytes from Redis cache or generated on the fly)
+
+# 6. Test redirect (should 302 → https://example.com)
+curl -s -o /dev/null -w "%{http_code} → %{redirect_url}" http://localhost:8000/r/aBcDeFgHiJ
+# → 302 → https://example.com
+
+# 7. Check click count (will be 0 — clicks are buffered in Redis)
+curl -s http://localhost:8000/v1/qr_code/aBcDeFgHiJ | python3 -m json.tool
+# → click_count: 0 (expected — see "Flush clicks" below)
+```
+
+### Local E2E testing (PostgreSQL via Docker Compose)
+
+Use this when you want to match production behaviour:
+
+```bash
+# 1. Start PostgreSQL + Redis (adjust port mapping in docker-compose as needed)
+#    Ensure env/.env points to the correct PostgreSQL and Redis ports
+
+# 2. Run Alembic migrations
+DATABASE_URL="postgresql+psycopg2://<user>:<pass>@localhost:<port>/<db>" \
+  alembic upgrade head
+
+# 3. Start server
+uvicorn app.main:app --reload --port 8000
+
+# 4. Same curl commands as above
+```
+
+### Flushing click counts (local)
+
+Redirect clicks are buffered in Redis (`qr:clicks:{YYYY-MM-DD-HH}`) and only written to DB by the flush job. In production, Cloud Scheduler calls this hourly. Locally, trigger it manually:
+
+```bash
+# Set INTERNAL_TOKEN in .env first, e.g. INTERNAL_TOKEN=dev-token
+curl -X POST http://localhost:8000/internal/flush_clicks \
+  -H "X-Internal-Token: dev-token"
+
+# Now click_count should reflect redirect visits
+curl -s http://localhost:8000/v1/qr_code/aBcDeFgHiJ | python3 -m json.tool
+```
+
+### Production E2E testing
+
+```bash
+# 1. Apply migrations via Cloud SQL Auth Proxy
+cloud-sql-proxy <PROJECT_ID>:asia-east1:qr-db &
+DATABASE_URL="postgresql+psycopg2://qrapp:<DB_PASSWORD>@127.0.0.1:5432/qrdb" \
+  alembic upgrade head
+
+# 2. Create a QR code
+curl -s -X POST https://<CLOUD_RUN_URL>/v1/qr_code \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+
+# 3. Test redirect
+curl -s -o /dev/null -w "%{http_code} → %{redirect_url}" \
+  https://<CLOUD_RUN_URL>/r/<TOKEN>
+
+# 4. Verify click flush (Cloud Scheduler runs at :05 every hour)
+#    Or trigger manually:
+curl -X POST https://<CLOUD_RUN_URL>/internal/flush_clicks \
+  -H "X-Internal-Token: <INTERNAL_TOKEN>"
+
+# 5. Confirm click_count updated
+curl -s https://<CLOUD_RUN_URL>/v1/qr_code/<TOKEN> | python3 -m json.tool
+```
 
 ## Production Deployment (GCP)
 

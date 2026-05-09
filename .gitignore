@@ -11,6 +11,6 @@ qr_codes/
 !architecture.png
 !flow.png
 node_modules/
-frontend/dist/
 .claude/worktrees
 *.db
+.env
