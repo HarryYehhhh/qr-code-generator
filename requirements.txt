@@ -11,3 +11,14 @@ redis==5.2.1
 pytest==8.3.5
 httpx==0.28.1
 fakeredis==2.28.1
+# Observability — Sprint B
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-gcp-trace
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-sqlalchemy
+opentelemetry-instrumentation-redis
+opentelemetry-instrumentation-requests
+prometheus-fastapi-instrumentator
+prometheus-client
+structlog

@@ -6,43 +6,61 @@ Consumer side: read_batch / claim_stale / ack / mark_processed
 
 from datetime import datetime, timezone
 
+import redis.exceptions
 from redis import Redis
+from opentelemetry import trace
 
 STREAM_KEY = "clicks:stream"
 GROUP_NAME = "click-aggregator"
 _DEDUPE_TTL = 3600  # seconds
 
+# Maximum entries to fetch in a single xpending_range call.
+# Tune this constant (or pass count= to claim_stale) when the pending list
+# can exceed this limit in steady state.
+_PENDING_FETCH_LIMIT = 500
 
-def publish_click(redis: Redis, token: str, ts: str) -> str:
+_tracer = trace.get_tracer(__name__)
+
+
+def publish_click(redis_client: Redis, token: str, ts: str) -> str:
     """XADD one click event; returns the entry ID."""
-    entry_id = redis.xadd(
-        STREAM_KEY,
-        {"token": token, "ts": ts},
-        maxlen=100000,
-        approximate=True,
-    )
-    # redis-py returns bytes; decode for convenience
-    if isinstance(entry_id, bytes):
-        return entry_id.decode()
-    return entry_id
+    with _tracer.start_as_current_span("click_stream.publish") as span:
+        entry_id = redis_client.xadd(
+            STREAM_KEY,
+            {"token": token, "ts": ts},
+            maxlen=100000,
+            approximate=True,
+        )
+        # redis-py returns bytes; decode for convenience
+        if isinstance(entry_id, bytes):
+            entry_id = entry_id.decode()
+        span.set_attribute("stream.entry_id", entry_id)
+        span.set_attribute("qr.token", token)
+
+        # Increment published metric
+        from app.metrics import observe_publish
+        observe_publish()
+
+        return entry_id
 
 
-def ensure_group(redis: Redis) -> None:
+def ensure_group(redis_client: Redis) -> None:
     """Create the consumer group if it does not exist.
 
     MKSTREAM creates the stream key as well so no prior XADD is required.
     BUSYGROUP means the group already exists — swallow it.
+    Raises any non-BUSYGROUP ResponseError so callers see real errors.
     """
     try:
-        redis.xgroup_create(STREAM_KEY, GROUP_NAME, id="0", mkstream=True)
-    except Exception as exc:
-        # redis-py raises ResponseError("BUSYGROUP ...")
+        redis_client.xgroup_create(STREAM_KEY, GROUP_NAME, id="0", mkstream=True)
+    except redis.exceptions.ResponseError as exc:
+        # redis-py raises ResponseError("BUSYGROUP ...") when group exists
         if "BUSYGROUP" not in str(exc):
             raise
 
 
 def read_batch(
-    redis: Redis,
+    redis_client: Redis,
     consumer_name: str,
     count: int,
     block_ms: int,
@@ -52,7 +70,7 @@ def read_batch(
     Returns [(entry_id, fields_dict), ...].
     Fields values are decoded from bytes to str.
     """
-    result = redis.xreadgroup(
+    result = redis_client.xreadgroup(
         GROUP_NAME,
         consumer_name,
         {STREAM_KEY: ">"},
@@ -66,16 +84,26 @@ def read_batch(
 
 
 def claim_stale(
-    redis: Redis,
+    redis_client: Redis,
     consumer_name: str,
     min_idle_ms: int,
+    count: int | None = None,
 ) -> list[tuple[str, dict]]:
     """XPENDING + XCLAIM to reclaim entries idle longer than min_idle_ms.
 
+    Args:
+        redis_client:  Redis connection.
+        consumer_name: Name of the consumer claiming the entries.
+        min_idle_ms:   Minimum idle time in ms for an entry to be claimed.
+        count:         Max entries to inspect in xpending_range.
+                       Defaults to _PENDING_FETCH_LIMIT (500).
+                       Increase this if steady-state pending list exceeds the limit.
+
     Returns same format as read_batch.
     """
-    pending = redis.xpending_range(
-        STREAM_KEY, GROUP_NAME, "-", "+", count=500
+    fetch_limit = count if count is not None else _PENDING_FETCH_LIMIT
+    pending = redis_client.xpending_range(
+        STREAM_KEY, GROUP_NAME, "-", "+", count=fetch_limit
     )
     if not pending:
         return []
@@ -88,7 +116,7 @@ def claim_stale(
     if not stale_ids:
         return []
 
-    claimed = redis.xclaim(
+    claimed = redis_client.xclaim(
         STREAM_KEY, GROUP_NAME, consumer_name, min_idle_time=min_idle_ms, message_ids=stale_ids
     )
     return [(_decode(eid), _decode_fields(fields)) for eid, fields in claimed]
