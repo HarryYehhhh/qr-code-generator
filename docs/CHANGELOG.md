@@ -14,6 +14,14 @@ Harness 執行記錄。**最新的在上面**（reverse chronological）。
 
 <!-- 新條目從這裡開始 -->
 
+## 2026-05-14 — sprint-c-load-test — evaluator — ⚠️ Pass with issues
+- 連結：docs/qa-reports/sprint-c-load-test.md
+- 備註：pytest tests/ -v 80/80 passed（既有 60 + 新增 20）；🔴 0、🟡 2、🟢 3；循環次數 1；未解 P0/P1 = 0。Contract 全條 deliverable 打勾，API 不變動，Sprint B 三條 QA warnings 實質清除。唯一 issue：README.md:476 與 CLAUDE.md:161 ADR 連結指向 `0002-observability-otel-prometheus.md` 但實際檔名為 `0002-otel-with-dual-exporter.md`（dead link，generator 自述已知）。test_docs_observability 僅查字串不查 link target，所以 test 綠但問題仍在。可合併，建議合併前順手改連結。
+
+## 2026-05-14 — sprint-c-load-test — planner — spec + contract 完成
+- 連結：docs/specs/sprint-c-load-test.md, docs/contracts/sprint-c-load-test.md
+- 備註：k6 三情境（redirect_hot / redirect_cold / image_mixed）+ seed + lib/common 共 5 個 `.js` 檔；docker-compose 新增 `k6` service 走 `loadtest` profile + prometheus remote-write；`docs/perf-report.md` 骨架完備，數字以 `<TBD:>` placeholder + 每處標 Run/Source 由使用者本地實跑後填。一併收 Sprint B 三條 QA warnings：README 補 Observability + Performance section、CLAUDE.md 補 Observability 段、`requirements.txt` 10 個 observability 套件 pin 版本。Scope 明列「不在 sandbox 內實跑 k6」，避免 evaluator 拿沒有真實數字當 Fail。無 ADR。Open questions：k6 image tag 是否 pin（暫 latest）；threshold 數值（500/1500/800 ms）由使用者依機器調整不鎖死。
+
 ## 2026-05-14 — sprint-b-observability — evaluator — ⚠️ Pass with issues
 - 連結：docs/qa-reports/sprint-b-observability.md
 - 備註：pytest tests/ -v 60/60 passed（既有 38 + 新增 22）；🔴 0、🟡 5、🟢 6；循環次數 1；未解 P0/P1 = 0。Sprint A 五條 QA warnings 經對應測試（`test_record_click_failure_emits_warning_log` / `test_run_once_respects_batch_count_param` / `test_main_loop_calls_run_once` / `test_worker_dedupe_skips_replay_real_xclaim` / `test_ensure_group_catches_response_error_only` / `test_claim_stale_count_param`）真實清除驗證通過。API 不變動聲明 38 case 全綠。主要 warning：README/CLAUDE.md 未補 Observability 章節（Docs deliverable 三條未交）、requirements.txt observability 套件未鎖版本（ADR-0002 明文要求）、BatchSpanProcessor 測試 teardown stderr 污染、`click_stream.consume_batch` wrapper 未實作（contract 允許「或於 worker 處」以 `worker.run_once` 替代）、Instrumentator 在 module load 而非 lifespan。可合併。

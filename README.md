@@ -420,6 +420,61 @@ docker-compose up -d worker
 # Click counts are eventually consistent; no lost or double-counted clicks
 ```
 
+## Performance
+
+Cache-hot redirects (`GET /r/{token}`) serve from Redis with minimal DB involvement — see [`docs/perf-report.md`](docs/perf-report.md) for the full load-test results (RPS / p50 / p95 / p99 across three k6 scenarios: redirect_hot, redirect_cold, image_mixed).
+
+To run a load test locally:
+
+```bash
+# Seed tokens, then run the hot-path scenario
+k6 run --env BASE_URL=http://localhost:8000 scripts/k6/seed.js \
+  2>/dev/null | grep "^TOKEN:" | sed 's/^TOKEN://' | jq -s '.' > scripts/k6/tokens.json
+k6 run --env BASE_URL=http://localhost:8000 scripts/k6/redirect_hot.js
+```
+
+See [`scripts/k6/README.md`](scripts/k6/README.md) for full instructions.
+
+## Observability
+
+The stack ships with three observability tools accessible locally via Docker Compose:
+
+| Tool | URL | Credentials |
+|------|-----|-------------|
+| **Jaeger** (distributed tracing) | http://localhost:16686 | — |
+| **Prometheus** (metrics scraping) | http://localhost:9090 | — |
+| **Grafana** (dashboards) | http://localhost:3000 | admin / admin |
+
+### Tracing with Jaeger
+
+Every inbound HTTP request and outbound Redis/DB call is traced via OpenTelemetry. Each trace carries a `trace_id`. To follow a request end-to-end:
+
+1. Make an API call (e.g. `curl http://localhost:8000/r/<token>`).
+2. Open Jaeger at http://localhost:16686, select service `qr-api`, and search by operation or time range.
+3. Click a trace to see Redis GET, DB SELECT, and XADD spans with durations.
+4. Copy the `trace_id` from Jaeger and paste it into Grafana's "Explore" view (if Grafana Tempo is configured) or use it to correlate structured log entries.
+
+### Metrics with Prometheus + Grafana
+
+Prometheus scrapes `http://api:8080/metrics` every 5 seconds. Key metrics:
+
+| Metric | Description |
+|--------|-------------|
+| `http_requests_total` | Request count by handler, method, status |
+| `http_request_duration_seconds` | Latency histogram by handler |
+| `qr_redirect_total` | Redirect count by `cache_result` (hit/miss) |
+| `qr_image_cache_total` | Image cache hits and misses |
+| `qr_db_pool_in_use` | DB connection pool saturation |
+| `qr_click_stream_lag` | Click stream consumer lag |
+
+Open Grafana at http://localhost:3000 (admin/admin) to view pre-provisioned dashboards.
+
+### ENVIRONMENT and dual exporter
+
+When `ENVIRONMENT=local` or `local-compose`, traces are exported to Jaeger via OTLP HTTP (`OTEL_EXPORTER_OTLP_ENDPOINT`). When `ENVIRONMENT=production`, the GCP trace exporter (`opentelemetry-exporter-gcp-trace`) is active — requires the Cloud Run service account to have `roles/cloudtrace.agent`.
+
+For details, see [docs/decisions/0002-otel-with-dual-exporter.md](docs/decisions/0002-otel-with-dual-exporter.md) (ADR-0002).
+
 ## Key Design Decisions
 
 - **Soft delete** — records are never physically removed; all queries filter `status == 'active'`

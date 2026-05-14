@@ -151,6 +151,30 @@ gcloud run deploy qr-code-generator \
 - DB password and `INTERNAL_TOKEN` live in Secret Manager.
 - See [README.md](README.md) for the full step-by-step deploy including Memorystore + VPC connector + Cloud Scheduler setup.
 
+### Observability
+
+Three observability modules work together:
+- **`app/observability.py`**: Initialises the OpenTelemetry SDK, configures tracer provider, and registers instrumentors for FastAPI, SQLAlchemy, and Redis. Switches between Jaeger OTLP exporter (local) and GCP Cloud Trace exporter (production) based on `ENVIRONMENT`.
+- **`app/logging.py`**: Configures `structlog` with JSON output in production, console-friendly output locally. Injects `trace_id` and `span_id` into every log record for cross-tool correlation.
+- **`app/metrics.py`**: Defines custom Prometheus counters and gauges (`qr_redirect_total`, `qr_image_cache_total`, `qr_db_pool_in_use`, `qr_click_stream_lag`, `qr_click_stream_published_total`, `qr_click_stream_consumed_total`). Exposed at `/metrics` via `prometheus-fastapi-instrumentator`.
+
+Decision rationale: [docs/decisions/0002-otel-with-dual-exporter.md](docs/decisions/0002-otel-with-dual-exporter.md) (ADR-0002).
+
+Production note: Cloud Run service account requires `roles/cloudtrace.agent` for GCP trace export.
+
+### Performance / Load Testing
+
+Load test scripts live in `scripts/k6/`. Three scenarios:
+- **redirect_hot** (`scripts/k6/redirect_hot.js`): cache-hot Redis URL cache path — throughput ceiling benchmark.
+- **redirect_cold** (`scripts/k6/redirect_cold.js`): DB write + SETEX path — measures Postgres INSERT latency under concurrent load.
+- **image_mixed** (`scripts/k6/image_mixed.js`): 50/50 image cache hit/miss — tests CPU-bound PNG generation vs Redis cache.
+
+Shared utilities: `scripts/k6/lib/common.js` (baseUrl, buildThresholds, pickToken, loadTokens).
+
+Results template and measurement guide: [`docs/perf-report.md`](docs/perf-report.md).
+
+To run: `k6 run --env BASE_URL=http://localhost:8000 scripts/k6/redirect_hot.js` (see `scripts/k6/README.md` for full workflow).
+
 ### Running migrations against production
 Use the [Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy) from a dev box / CI rather than the runtime Connector:
 ```bash
