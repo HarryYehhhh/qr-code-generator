@@ -353,11 +353,78 @@ gcloud sql instances delete qr-db --quiet
 gcloud artifacts repositories delete qr-repo --location=asia-east1 --quiet
 ```
 
+## Architecture (Sprint A)
+
+Sprint A splits click counting into an async producer / consumer pipeline backed by Redis Streams.
+
+### Topology
+
+```mermaid
+graph LR
+    Client[Client / Browser]
+    API[API :8080\nFastAPI producer]
+    Stream[(clicks:stream\nRedis Stream)]
+    Worker[Worker\nconsumer group click-aggregator]
+    Hash[(qr:clicks:YYYY-MM-DD-HH\nRedis Hash)]
+    FlushJob[Hourly flush job\n/internal/flush_clicks]
+    DB[(PostgreSQL\nqr_click_stats)]
+
+    Client -->|GET /r/{token}| API
+    API -->|XADD token ts| Stream
+    Worker -->|XREADGROUP| Stream
+    Worker -->|HINCRBY| Hash
+    FlushJob -->|HSCAN + RENAME| Hash
+    FlushJob -->|INSERT ON CONFLICT| DB
+```
+
+**Key design points:**
+- `_record_click()` in `app/main.py` does `XADD clicks:stream … MAXLEN ~ 100000` — the 302 redirect never touches a hash or DB.
+- Worker (`app/worker.py`) runs as a separate process, reads via `XREADGROUP`, accumulates an in-memory dict, and flushes to `qr:clicks:{hour}` hashes every `BATCH_SIZE` entries or `FLUSH_INTERVAL_SECONDS` seconds (whichever comes first).
+- Crash recovery: on startup, worker calls `XPENDING` + `XCLAIM` to reclaim entries left by a dead consumer.
+- Idempotency: `SET qr:clicks:dedupe:{entry_id} 1 EX 3600 NX` prevents double-counting when an entry is replayed via `XCLAIM`.
+- The existing hourly flush job (`/internal/flush_clicks`) and `qr_click_stats` schema are unchanged — they drain the same `qr:clicks:{hour}` hashes the worker fills.
+
+Decision rationale: [docs/decisions/0001-redis-streams-for-click-pipeline.md](docs/decisions/0001-redis-streams-for-click-pipeline.md)
+
+### Local quick-start (Docker Compose)
+
+Starts all four services — `api`, `worker`, `redis`, `postgres` — with one command:
+
+```bash
+docker-compose up
+```
+
+The api is exposed at `http://localhost:8000`. The worker runs as a separate container sharing the same image, with `command: python -m app.worker` overriding the default Dockerfile CMD.
+
+```bash
+# Create a QR code and test redirect
+curl -s -X POST http://localhost:8000/v1/qr_code \
+  -H "Content-Type: application/json" -d '{"url": "https://example.com"}'
+# → {"qr_token": "aBcDeFgHiJ"}
+
+curl -o /dev/null -w "%{http_code}" http://localhost:8000/r/aBcDeFgHiJ
+# → 302 (worker will aggregate the click within ~5 s)
+
+# Inspect click hash in Redis
+docker-compose exec redis redis-cli HGETALL qr:clicks:$(date -u +%Y-%m-%d-%H)
+```
+
+**Resilience test:**
+```bash
+# Kill the worker mid-flight
+docker-compose kill worker
+
+# Restart — XCLAIM reclaims orphaned entries
+docker-compose up -d worker
+
+# Click counts are eventually consistent; no lost or double-counted clicks
+```
+
 ## Key Design Decisions
 
 - **Soft delete** — records are never physically removed; all queries filter `status == 'active'`
 - **302 redirect** — allows URL updates to take effect immediately
-- **Async click counting** — redirect path writes `HINCRBY qr:clicks:{hour}` instead of `UPDATE qr_codes`. A Cloud Scheduler hourly cron drains the bucket into `qr_click_stats` via `/internal/flush_clicks`. Idempotent: rename-then-delete + `ON CONFLICT DO UPDATE` with additive merge.
+- **Async click counting (Sprint A)** — redirect path publishes `XADD clicks:stream … MAXLEN ~ 100000` (producer). A separate worker process (`app/worker.py`) reads via `XREADGROUP`, aggregates in memory, and flushes to `qr:clicks:{hour}` hashes. A Cloud Scheduler hourly cron drains the hashes into `qr_click_stats` via `/internal/flush_clicks`. Idempotent: rename-then-delete + `ON CONFLICT DO UPDATE` with additive merge. Crash recovery via `XCLAIM`; double-count protection via per-entry dedupe key.
 - **URL cache pre-warm** — `POST /v1/qr_code` writes `qr:url:{token}` to Redis (TTL 24h), so the first redirect after creation is already a cache hit. Cache is invalidated on update / delete.
 - **Image cache** — PNG bytes live in Redis under content-addressed key `qr:img:{spec_hash}:{url_hash16}`, TTL 7 days. Cache miss regenerates in process (~10–20 ms CPU). No GCS, no CDN, no disk.
 - **Connection pool sized for db-f1-micro** — `pool_size=1, max_overflow=2, pool_recycle=300, pool_pre_ping=True`. Combined with Cloud Run `--max-instances=6`, app stays under the ~25 connection ceiling with headroom for admin / migrations / flush job.
