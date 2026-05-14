@@ -78,6 +78,9 @@ services:
       - "9090:9090"
     volumes:
       - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-remote-write-receiver"
 
   grafana:
     image: grafana/grafana:latest
@@ -88,6 +91,20 @@ services:
     volumes:
       - ./docker/grafana/provisioning:/etc/grafana/provisioning
       - ./docker/grafana/dashboards:/var/lib/grafana/dashboards
+
+  k6:
+    image: grafana/k6:latest
+    profiles: ["loadtest"]
+    volumes:
+      - ./scripts/k6:/scripts:ro
+    command: ["run", "--out", "experimental-prometheus-rw", "/scripts/redirect_hot.js"]
+    environment:
+      K6_PROMETHEUS_RW_SERVER_URL: "http://prometheus:9090/api/v1/write"
+      K6_PROMETHEUS_RW_TREND_STATS: "p(50),p(95),p(99),min,max"
+      BASE_URL: "http://api:8080"
+    depends_on:
+      - api
+      - prometheus
 
 volumes:
   postgres_data:
