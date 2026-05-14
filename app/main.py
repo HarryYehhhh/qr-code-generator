@@ -14,6 +14,7 @@ from app.database import Base, close_connector, engine, get_db
 from app.dependencies import get_redis
 from app.routers import internal as internal_router
 from app.routers import qr
+from app.services.click_stream import publish_click
 from app.services.qr_service import get_qr_code_any_status
 
 
@@ -88,5 +89,13 @@ def redirect(
 
 
 def _record_click(redis: Redis, token: str) -> None:
-    hour = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
-    redis.hincrby(f"qr:clicks:{hour}", token, 1)
+    """Publish a click event to the Redis Stream.
+
+    Failures are swallowed so that a Redis hiccup never breaks the 302 redirect.
+    """
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        publish_click(redis, token, ts)
+    except Exception:
+        # Best-effort: a pipeline outage must not affect redirect SLA
+        pass

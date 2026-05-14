@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: qrapp
+      POSTGRES_PASSWORD: qrpassword
+      POSTGRES_DB: qrdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qrapp -d qrdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    # CMD inherited from Dockerfile: uvicorn app.main:app --host 0.0.0.0 --port 8080
+    ports:
+      - "8000:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: local-compose
+      DATABASE_URL: postgresql+psycopg2://qrapp:qrpassword@postgres:5432/qrdb
+      REDIS_URL: redis://redis:6379/0
+      SERVER_SECRET: dev-secret-change-me
+      INTERNAL_TOKEN: dev-internal-token
+
+  worker:
+    build: .
+    command: python -m app.worker
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: local-compose
+      DATABASE_URL: postgresql+psycopg2://qrapp:qrpassword@postgres:5432/qrdb
+      REDIS_URL: redis://redis:6379/0
+      SERVER_SECRET: dev-secret-change-me
+      INTERNAL_TOKEN: dev-internal-token
+      BATCH_SIZE: "500"
+      FLUSH_INTERVAL_SECONDS: "5"
+      CLAIM_MIN_IDLE_MS: "60000"
+
+volumes:
+  postgres_data:

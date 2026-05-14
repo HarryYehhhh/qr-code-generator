@@ -31,6 +31,12 @@ curl http://localhost:8000/v1/qr_code/{qr_token}
 curl "http://localhost:8000/v1/qr_code_image/{qr_token}?dimension=256&color=%23000000&border=4"
 curl -L http://localhost:8000/r/{qr_token}
 
+# Run the click-stream worker (Sprint A)
+python -m app.worker
+
+# Start full local stack (api + worker + redis + postgres) via Docker Compose
+docker-compose up
+
 # Run tests
 pytest tests/ -v
 
@@ -67,7 +73,7 @@ QR Code Generator using FastAPI backend (API-only, no frontend). Local dev uses 
 DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries filter `status == 'active'`. Rows are never physically removed.
 
 ### Redirect Route
-`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Reads URL from Redis (`qr:url:{token}`) — falls back to DB on cache miss and populates the cache. Click counting is async: fires `HINCRBY qr:clicks:{hour}` rather than touching `qr_codes`. `click_count` and `last_clicked_at` are populated by the hourly flush job (see Click Stats Pipeline). Registered **after** `/v1` router to avoid path conflicts.
+`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Reads URL from Redis (`qr:url:{token}`) — falls back to DB on cache miss and populates the cache. Click counting is async: fires `XADD clicks:stream … MAXLEN ~ 100000` (producer) — the worker process drains the stream and writes to `qr:clicks:{hour}`. `click_count` and `last_clicked_at` are populated by the hourly flush job (see Click Stats Pipeline). Registered **after** `/v1` router to avoid path conflicts.
 
 ### API Contracts
 - `POST /v1/qr_code` → `{"qr_token": "..."}` (201)
@@ -81,8 +87,28 @@ DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries fi
 ### Schema Migrations
 Alembic is the source of truth for production schema. `alembic/env.py` reads `settings.DATABASE_URL` and imports `app.models` so `--autogenerate` sees all tables. The lifespan in `app/main.py` only runs `create_all` on SQLite — PostgreSQL must be migrated explicitly via `alembic upgrade head`. Tests still use `create_all` directly because they target a transient SQLite DB.
 
-### Click Stats Pipeline
-Per-redirect counter writes go to Redis (`qr:clicks:{YYYY-MM-DD-HH}` hash, field=token, value=count) instead of UPDATEing `qr_codes`. A scheduled `POST /internal/flush_clicks` (Cloud Scheduler, hourly) drains the previous-hour key into the `qr_click_stats` table via `flush_previous_hour` in `app/jobs/flush_clicks.py`. Flush is idempotent: rename-then-delete + `ON CONFLICT (qr_token, hour_bucket) DO UPDATE SET click_count = ... + EXCLUDED.click_count`. Auth on the endpoint uses an `X-Internal-Token` header against `settings.INTERNAL_TOKEN`.
+### Click Stats Pipeline (Sprint A — Redis Streams)
+
+**Decision**: see [docs/decisions/0001-redis-streams-for-click-pipeline.md](docs/decisions/0001-redis-streams-for-click-pipeline.md)
+
+**Producer** (`app/main.py` → `app/services/click_stream.py`):
+- `_record_click()` calls `publish_click(redis, token, ts)` which does `XADD clicks:stream {"token": ..., "ts": <ISO8601 UTC>} MAXLEN ~ 100000`.
+- Failures are swallowed so that a Redis hiccup never blocks the 302 redirect.
+
+**Consumer / Worker** (`app/worker.py`):
+- Runs as a separate process: `python -m app.worker`.
+- On startup: `XGROUP CREATE clicks:stream click-aggregator $ MKSTREAM` (idempotent), then `XPENDING` + `XCLAIM` to reclaim orphaned entries from dead consumers.
+- Main loop: `XREADGROUP click-aggregator <consumer_name> clicks:stream > COUNT <BATCH_SIZE> BLOCK 1000ms`.
+- Accumulates counts in `FlushBuffer` (in-memory `{hour_bucket: {token: count}}`).
+- Flush trigger: `len(pending_ids) >= BATCH_SIZE` OR `elapsed >= FLUSH_INTERVAL_SECONDS` (default 5 s).
+- Flush: `HINCRBY qr:clicks:{hour} token count` for each bucket/token pair → `XACK` all entry IDs.
+- Idempotency: `SET qr:clicks:dedupe:{entry_id} 1 EX 3600 NX` before counting — replayed entries (from XCLAIM) are acked and skipped.
+- Handles `SIGTERM` / `SIGINT` by flushing the buffer before exit.
+
+**Hourly flush job** (`app/jobs/flush_clicks.py`) is **unchanged**:
+- Drains `qr:clicks:{YYYY-MM-DD-HH}` hash into `qr_click_stats` via rename-then-delete + `ON CONFLICT DO UPDATE`.
+- Auth: `X-Internal-Token` header against `settings.INTERNAL_TOKEN`.
+- Production: triggered by Cloud Scheduler every hour at :05.
 
 ### Testing
 Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `tests/conftest.py` overrides the `get_db` dependency so tests never touch the dev database. Each test gets a fresh schema via `create_all` / `drop_all`.
