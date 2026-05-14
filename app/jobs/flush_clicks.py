@@ -1,11 +1,11 @@
-import logging
 from datetime import datetime, timedelta, timezone
 
+import structlog
 from redis import Redis
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 CLICKS_KEY_PREFIX = "qr:clicks"
 FLUSHING_SUFFIX = ":flushing"
