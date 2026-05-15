@@ -1,8 +1,9 @@
 """Structured logging configuration using structlog.
 
-Call configure_logging() once at application startup (lifespan / worker main).
+Call configure_logging() once at application startup (lifespan).
 All stdlib logging (uvicorn, sqlalchemy, redis) is redirected through the same
-processor chain so every log line is a single JSON object.
+processor chain so every log line is a single JSON object that GCP Cloud
+Logging parses natively.
 
 Usage::
 
@@ -20,35 +21,10 @@ import sys
 from typing import Any
 
 import structlog
-from opentelemetry import trace
-
-
-def _add_trace_context(
-    logger: Any,  # noqa: ANN401
-    method_name: str,
-    event_dict: dict,
-) -> dict:
-    """Inject OTel trace_id / span_id into the event dict.
-
-    When no active span exists (INVALID_SPAN), empty strings are used so
-    the fields are always present in every log line.
-    """
-    span = trace.get_current_span()
-    ctx = span.get_span_context()
-    if ctx.is_valid:
-        event_dict["trace_id"] = format(ctx.trace_id, "032x")
-        event_dict["span_id"] = format(ctx.span_id, "016x")
-    else:
-        event_dict["trace_id"] = ""
-        event_dict["span_id"] = ""
-    return event_dict
 
 
 def configure_logging() -> None:
-    """Set up structlog with JSON output and trace context injection.
-
-    Idempotent: calling twice is safe.
-    """
+    """Set up structlog with JSON output. Idempotent."""
     log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     log_level = getattr(logging, log_level_name, logging.INFO)
 
@@ -59,7 +35,6 @@ def configure_logging() -> None:
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
-        _add_trace_context,
     ]
 
     structlog.configure(

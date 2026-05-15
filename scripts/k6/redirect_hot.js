@@ -9,7 +9,7 @@
  * Run:
  *   # 1. Seed tokens first (once):
  *   k6 run --env BASE_URL=http://localhost:8000 scripts/k6/seed.js \
- *     2>/dev/null | grep "^TOKEN:" | sed 's/^TOKEN://' | jq -s '.' > scripts/k6/tokens.json
+ *     2>&1 | sed -nE 's|^time=.*level=info msg="TOKEN:([^"]+)".*|\1|p' | jq -R . | jq -s . > scripts/k6/tokens.json
  *
  *   # 2. Run the hot scenario:
  *   k6 run --env BASE_URL=http://localhost:8000 scripts/k6/redirect_hot.js

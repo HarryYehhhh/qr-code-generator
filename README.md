@@ -1,6 +1,8 @@
 # QR Code Generator
 
-A QR code management API service. FastAPI backend with dynamic redirect links, click tracking, and customisable QR images. Redis-backed for fast URL cache, async click counters, and PNG byte caching. Local dev runs on SQLite; production runs on Cloud Run + Cloud SQL + Memorystore.
+A focused URL-shortener / QR-image service. FastAPI backend with dynamic redirects and customisable QR images, Redis-backed for sub-ms cache lookups. Local dev runs on SQLite; production runs on Cloud Run + Cloud SQL + Memorystore. Full architecture diagram and design rationale: [`docs/architecture.md`](docs/architecture.md).
+
+> **Scope** ([ADR-0003](docs/decisions/0003-remove-click-counting-mvp.md)): the MVP focuses on the **redirect path**. Click counting / analytics was implemented in Sprint A but removed to keep the architecture story crisp. Sprint A docs are kept as historical record of the decision.
 
 ## Tech Stack
 
@@ -11,7 +13,7 @@ A QR code management API service. FastAPI backend with dynamic redirect links, c
 - **Validation**: Pydantic v2
 - **QR Generation**: qrcode + Pillow
 - **Database**: SQLite (local) / Cloud SQL PostgreSQL via Cloud SQL Python Connector (production)
-- **Cache & async work**: Redis — URL cache, hourly click counter, PNG byte cache
+- **Cache**: Redis — URL cache + PNG byte cache
 - **Deployment**: Docker + Cloud Run
 
 ## Architecture
@@ -26,8 +28,8 @@ graph LR
     Redis[(Redis :6379)]
 
     Client -->|API request| API
-    API -->|metadata| DB
-    API -->|URL cache, clicks, PNG bytes| Redis
+    API -->|metadata (cache miss)| DB
+    API -->|URL cache + PNG bytes| Redis
 ```
 
 ### Production (GCP)
@@ -38,12 +40,10 @@ graph LR
     CR[Cloud Run :8080]
     SQL[(Cloud SQL<br/>PostgreSQL)]
     Mem[(Memorystore<br/>Redis)]
-    Sched[Cloud Scheduler]
 
     Client -->|API request| CR
     CR -->|Cloud SQL Connector<br/>pg8000| SQL
-    CR -->|cache + clicks| Mem
-    Sched -->|hourly flush| CR
+    CR -->|URL cache + PNG bytes| Mem
 ```
 
 `ENVIRONMENT` and `INSTANCE_CONNECTION_NAME` together select the DB transport. Single `app/database.py` factory branches on these — see [CLAUDE.md](CLAUDE.md) for connection-pool sizing rationale.
@@ -58,10 +58,7 @@ graph LR
 | `PUT` | `/v1/qr_code/{token}` | Update target URL (invalidates cache) | 204 |
 | `DELETE` | `/v1/qr_code/{token}` | Soft delete (invalidates cache) | 204 |
 | `GET` | `/v1/qr_code_image/{token}` | Returns PNG bytes (`image/png`, `Cache-Control: max-age=300`) | 200 / 404 |
-| `GET` | `/r/{token}` | 302 redirect to target URL (also fires `HINCRBY` click counter) | 302 / 410 |
-| `POST` | `/internal/flush_clicks` | Drain hourly click counter to DB (Cloud Scheduler trigger, `X-Internal-Token` header) | 200 |
-
-`click_count` and `last_clicked_at` are eventually consistent — they lag up to 1 hour behind real traffic, populated by the hourly flush job.
+| `GET` | `/r/{token}` | 302 redirect to target URL | 302 / 404 / 410 |
 
 ### Image Query Parameters
 
@@ -74,7 +71,7 @@ graph LR
 ## Quick Start
 
 ```bash
-# Redis (required for URL cache, click counters, image bytes)
+# Redis (required for URL cache + image PNG bytes)
 docker run -d -p 6379:6379 --name qr-redis redis:7-alpine
 
 # Backend
@@ -171,9 +168,9 @@ curl -s -o qr.png "http://localhost:8000/v1/qr_code_image/aBcDeFgHiJ?dimension=2
 curl -s -o /dev/null -w "%{http_code} → %{redirect_url}" http://localhost:8000/r/aBcDeFgHiJ
 # → 302 → https://example.com
 
-# 7. Check click count (will be 0 — clicks are buffered in Redis)
+# 7. Inspect QR metadata
 curl -s http://localhost:8000/v1/qr_code/aBcDeFgHiJ | python3 -m json.tool
-# → click_count: 0 (expected — see "Flush clicks" below)
+# → {"url": "...", "status": "active", "created_at": "..."}
 ```
 
 ### Local E2E testing (PostgreSQL via Docker Compose)
@@ -194,19 +191,6 @@ uvicorn app.main:app --reload --port 8000
 # 4. Same curl commands as above
 ```
 
-### Flushing click counts (local)
-
-Redirect clicks are buffered in Redis (`qr:clicks:{YYYY-MM-DD-HH}`) and only written to DB by the flush job. In production, Cloud Scheduler calls this hourly. Locally, trigger it manually:
-
-```bash
-# Set INTERNAL_TOKEN in .env first, e.g. INTERNAL_TOKEN=dev-token
-curl -X POST http://localhost:8000/internal/flush_clicks \
-  -H "X-Internal-Token: dev-token"
-
-# Now click_count should reflect redirect visits
-curl -s http://localhost:8000/v1/qr_code/aBcDeFgHiJ | python3 -m json.tool
-```
-
 ### Production E2E testing
 
 ```bash
@@ -223,14 +207,6 @@ curl -s -X POST https://<CLOUD_RUN_URL>/v1/qr_code \
 # 3. Test redirect
 curl -s -o /dev/null -w "%{http_code} → %{redirect_url}" \
   https://<CLOUD_RUN_URL>/r/<TOKEN>
-
-# 4. Verify click flush (Cloud Scheduler runs at :05 every hour)
-#    Or trigger manually:
-curl -X POST https://<CLOUD_RUN_URL>/internal/flush_clicks \
-  -H "X-Internal-Token: <INTERNAL_TOKEN>"
-
-# 5. Confirm click_count updated
-curl -s https://<CLOUD_RUN_URL>/v1/qr_code/<TOKEN> | python3 -m json.tool
 ```
 
 ## Production Deployment (GCP)
@@ -248,7 +224,6 @@ gcloud services enable \
   redis.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
-  cloudscheduler.googleapis.com \
   secretmanager.googleapis.com \
   vpcaccess.googleapis.com
 ```
@@ -295,7 +270,6 @@ DATABASE_URL="postgresql+psycopg2://qrapp:<DB_PASSWORD>@127.0.0.1:5432/qrdb" \
 ```bash
 echo -n "<DB_PASSWORD>" | gcloud secrets create qr-db-pass --data-file=-
 openssl rand -hex 32 | gcloud secrets create qr-server-secret --data-file=-
-openssl rand -hex 32 | gcloud secrets create qr-internal-token --data-file=-
 ```
 
 ### 6. Build & deploy
@@ -316,25 +290,14 @@ gcloud run deploy qr-code-generator \
   --vpc-connector=qr-connector \
   --service-account=qr-runtime@<PROJECT_ID>.iam.gserviceaccount.com \
   --set-env-vars="ENVIRONMENT=production,INSTANCE_CONNECTION_NAME=<PROJECT_ID>:asia-east1:qr-db,DB_USER=qrapp,DB_NAME=qrdb,CLOUD_SQL_IP_TYPE=PUBLIC,REDIS_URL=redis://<MEMORYSTORE_IP>:6379/0" \
-  --set-secrets="DB_PASS=qr-db-pass:latest,SERVER_SECRET=qr-server-secret:latest,INTERNAL_TOKEN=qr-internal-token:latest"
+  --set-secrets="DB_PASS=qr-db-pass:latest,SERVER_SECRET=qr-server-secret:latest"
 ```
 
 The runtime service account needs `roles/cloudsql.client` and `roles/redis.editor`.
 
 > Don't pass `--add-cloudsql-instances` — the Cloud SQL Python Connector replaces the Unix-socket transport.
 
-### 7. Schedule the hourly click flush
-
-```bash
-gcloud scheduler jobs create http qr-flush-clicks \
-  --location=asia-east1 \
-  --schedule="5 * * * *" \
-  --uri="https://<CLOUD_RUN_URL>/internal/flush_clicks" \
-  --http-method=POST \
-  --headers="X-Internal-Token=<INTERNAL_TOKEN>"
-```
-
-### 8. Verify
+### 7. Verify
 
 ```bash
 curl -X POST https://<CLOUD_RUN_URL>/v1/qr_code \
@@ -345,7 +308,6 @@ curl -X POST https://<CLOUD_RUN_URL>/v1/qr_code \
 ### Cleanup
 
 ```bash
-gcloud scheduler jobs delete qr-flush-clicks --location=asia-east1 --quiet
 gcloud run services delete qr-code-generator --region=asia-east1 --quiet
 gcloud redis instances delete qr-redis --region=asia-east1 --quiet
 gcloud compute networks vpc-access connectors delete qr-connector --region=asia-east1 --quiet
@@ -353,72 +315,24 @@ gcloud sql instances delete qr-db --quiet
 gcloud artifacts repositories delete qr-repo --location=asia-east1 --quiet
 ```
 
-## Architecture (Sprint A)
-
-Sprint A splits click counting into an async producer / consumer pipeline backed by Redis Streams.
-
-### Topology
-
-```mermaid
-graph LR
-    Client[Client / Browser]
-    API[API :8080\nFastAPI producer]
-    Stream[(clicks:stream\nRedis Stream)]
-    Worker[Worker\nconsumer group click-aggregator]
-    Hash[(qr:clicks:YYYY-MM-DD-HH\nRedis Hash)]
-    FlushJob[Hourly flush job\n/internal/flush_clicks]
-    DB[(PostgreSQL\nqr_click_stats)]
-
-    Client -->|GET /r/{token}| API
-    API -->|XADD token ts| Stream
-    Worker -->|XREADGROUP| Stream
-    Worker -->|HINCRBY| Hash
-    FlushJob -->|HSCAN + RENAME| Hash
-    FlushJob -->|INSERT ON CONFLICT| DB
-```
-
-**Key design points:**
-- `_record_click()` in `app/main.py` does `XADD clicks:stream … MAXLEN ~ 100000` — the 302 redirect never touches a hash or DB.
-- Worker (`app/worker.py`) runs as a separate process, reads via `XREADGROUP`, accumulates an in-memory dict, and flushes to `qr:clicks:{hour}` hashes every `BATCH_SIZE` entries or `FLUSH_INTERVAL_SECONDS` seconds (whichever comes first).
-- Crash recovery: on startup, worker calls `XPENDING` + `XCLAIM` to reclaim entries left by a dead consumer.
-- Idempotency: `SET qr:clicks:dedupe:{entry_id} 1 EX 3600 NX` prevents double-counting when an entry is replayed via `XCLAIM`.
-- The existing hourly flush job (`/internal/flush_clicks`) and `qr_click_stats` schema are unchanged — they drain the same `qr:clicks:{hour}` hashes the worker fills.
-
-Decision rationale: [docs/decisions/0001-redis-streams-for-click-pipeline.md](docs/decisions/0001-redis-streams-for-click-pipeline.md)
-
-### Local quick-start (Docker Compose)
-
-Starts all four services — `api`, `worker`, `redis`, `postgres` — with one command:
+## Local quick-start (Docker Compose)
 
 ```bash
-docker-compose up
-```
+docker compose up -d
+docker compose exec api alembic upgrade head    # one-time, creates Postgres schema
 
-The api is exposed at `http://localhost:8000`. The worker runs as a separate container sharing the same image, with `command: python -m app.worker` overriding the default Dockerfile CMD.
-
-```bash
-# Create a QR code and test redirect
+# Test redirect
 curl -s -X POST http://localhost:8000/v1/qr_code \
   -H "Content-Type: application/json" -d '{"url": "https://example.com"}'
 # → {"qr_token": "aBcDeFgHiJ"}
 
-curl -o /dev/null -w "%{http_code}" http://localhost:8000/r/aBcDeFgHiJ
-# → 302 (worker will aggregate the click within ~5 s)
-
-# Inspect click hash in Redis
-docker-compose exec redis redis-cli HGETALL qr:clicks:$(date -u +%Y-%m-%d-%H)
+curl -o /dev/null -w "%{http_code} → %{redirect_url}\n" http://localhost:8000/r/aBcDeFgHiJ
+# → 302 → https://example.com
 ```
 
-**Resilience test:**
-```bash
-# Kill the worker mid-flight
-docker-compose kill worker
+## Local quick-start (Docker Compose) — note
 
-# Restart — XCLAIM reclaims orphaned entries
-docker-compose up -d worker
-
-# Click counts are eventually consistent; no lost or double-counted clicks
-```
+The compose stack now boots only `api + postgres + redis` ([ADR-0004](docs/decisions/0004-simplify-observability-keep-structlog.md) removed the Jaeger / Prometheus / Grafana sidecars). Application logs are JSON on stdout — `docker compose logs api` to view them.
 
 ## Performance
 
@@ -437,52 +351,28 @@ See [`scripts/k6/README.md`](scripts/k6/README.md) for full instructions.
 
 ## Observability
 
-The stack ships with three observability tools accessible locally via Docker Compose:
+Sprint B originally shipped a full three-pillar stack — OpenTelemetry tracing (Jaeger local / Cloud Trace prod), Prometheus + Grafana metrics, structlog JSON logs. **[ADR-0004](docs/decisions/0004-simplify-observability-keep-structlog.md) removed the OTel + Prometheus halves** because for this single-process service they were ~5–10 % overhead with marginal value: traces only matter across services (we have one), and Cloud Run's built-in console already covers latency / RPS / error rate without any code.
 
-| Tool | URL | Credentials |
-|------|-----|-------------|
-| **Jaeger** (distributed tracing) | http://localhost:16686 | — |
-| **Prometheus** (metrics scraping) | http://localhost:9090 | — |
-| **Grafana** (dashboards) | http://localhost:3000 | admin / admin |
+What remains:
 
-### Tracing with Jaeger
+- **`structlog` JSON logs to stdout** (`app/logging.py`). On Cloud Run, Cloud Logging parses every line natively — searchable, alertable, and the source for log-based metrics if needed later.
+- **Cloud Run console** for latency p50/p95/p99 + error rate + concurrency + container CPU/memory + instance count, no SDK required.
 
-Every inbound HTTP request and outbound Redis/DB call is traced via OpenTelemetry. Each trace carries a `trace_id`. To follow a request end-to-end:
+```bash
+# Inspect structured logs locally:
+docker compose logs api | jq .
+```
 
-1. Make an API call (e.g. `curl http://localhost:8000/r/<token>`).
-2. Open Jaeger at http://localhost:16686, select service `qr-api`, and search by operation or time range.
-3. Click a trace to see Redis GET, DB SELECT, and XADD spans with durations.
-4. Copy the `trace_id` from Jaeger and paste it into Grafana's "Explore" view (if Grafana Tempo is configured) or use it to correlate structured log entries.
-
-### Metrics with Prometheus + Grafana
-
-Prometheus scrapes `http://api:8080/metrics` every 5 seconds. Key metrics:
-
-| Metric | Description |
-|--------|-------------|
-| `http_requests_total` | Request count by handler, method, status |
-| `http_request_duration_seconds` | Latency histogram by handler |
-| `qr_redirect_total` | Redirect count by `cache_result` (hit/miss) |
-| `qr_image_cache_total` | Image cache hits and misses |
-| `qr_db_pool_in_use` | DB connection pool saturation |
-| `qr_click_stream_lag` | Click stream consumer lag |
-
-Open Grafana at http://localhost:3000 (admin/admin) to view pre-provisioned dashboards.
-
-### ENVIRONMENT and dual exporter
-
-When `ENVIRONMENT=local` or `local-compose`, traces are exported to Jaeger via OTLP HTTP (`OTEL_EXPORTER_OTLP_ENDPOINT`). When `ENVIRONMENT=production`, the GCP trace exporter (`opentelemetry-exporter-gcp-trace`) is active — requires the Cloud Run service account to have `roles/cloudtrace.agent`.
-
-For details, see [docs/decisions/0002-otel-with-dual-exporter.md](docs/decisions/0002-otel-with-dual-exporter.md) (ADR-0002).
+If multi-service tracing is ever needed, re-introduce OTel SDK with a single Cloud Trace exporter — see ADR-0004 for the recommended approach.
 
 ## Key Design Decisions
 
 - **Soft delete** — records are never physically removed; all queries filter `status == 'active'`
 - **302 redirect** — allows URL updates to take effect immediately
-- **Async click counting (Sprint A)** — redirect path publishes `XADD clicks:stream … MAXLEN ~ 100000` (producer). A separate worker process (`app/worker.py`) reads via `XREADGROUP`, aggregates in memory, and flushes to `qr:clicks:{hour}` hashes. A Cloud Scheduler hourly cron drains the hashes into `qr_click_stats` via `/internal/flush_clicks`. Idempotent: rename-then-delete + `ON CONFLICT DO UPDATE` with additive merge. Crash recovery via `XCLAIM`; double-count protection via per-entry dedupe key.
+- **Click counting removed (ADR-0003)** — Sprint A originally implemented an async click pipeline (Redis Streams + worker). It was removed to keep the MVP focused on the redirect path. See [ADR-0003](docs/decisions/0003-remove-click-counting-mvp.md) for rationale and the recommended modern shape (Cloud CDN logs → Pub/Sub → BigQuery) when this gets re-added.
 - **URL cache pre-warm** — `POST /v1/qr_code` writes `qr:url:{token}` to Redis (TTL 24h), so the first redirect after creation is already a cache hit. Cache is invalidated on update / delete.
 - **Image cache** — PNG bytes live in Redis under content-addressed key `qr:img:{spec_hash}:{url_hash16}`, TTL 7 days. Cache miss regenerates in process (~10–20 ms CPU). No GCS, no CDN, no disk.
-- **Connection pool sized for db-f1-micro** — `pool_size=1, max_overflow=2, pool_recycle=300, pool_pre_ping=True`. Combined with Cloud Run `--max-instances=6`, app stays under the ~25 connection ceiling with headroom for admin / migrations / flush job.
+- **Connection pool sized for db-f1-micro** — `pool_size=1, max_overflow=2, pool_recycle=300, pool_pre_ping=True`. Combined with Cloud Run `--max-instances=6`, app stays under the ~25 connection ceiling.
 - **Cloud SQL Python Connector** — production transport (pg8000 driver). Activated when `INSTANCE_CONNECTION_NAME` is set. Migrations stay on `psycopg2-binary` via Cloud SQL Auth Proxy from a dev box / CI.
 - **Token generation** — `SHA-256(url + random_nonce + SERVER_SECRET)` → first 10 Base62 chars. Retries up to 5 times on UNIQUE collision.
 
