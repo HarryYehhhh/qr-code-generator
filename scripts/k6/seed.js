@@ -7,11 +7,19 @@
  *   Outputs collected tokens to stdout as a JSON array.
  *
  * Run:
- *   k6 run --env BASE_URL=http://localhost:8000 --env SEED_COUNT=1000 scripts/k6/seed.js \
- *     2>/dev/null | grep '^TOKENS:' | sed 's/^TOKENS://' > scripts/k6/tokens.json
+ *   # k6 v0.50+ wraps console.log output as `time=... level=info msg="TOKEN:xxx" source=console`
+ *   # on STDERR, so we capture stderr and extract the token from the msg field.
+ *   # NOTE: sed uses `|` as delimiter to avoid `*` followed by `/` (which closes JSDoc).
+ *   docker compose --profile loadtest run --rm k6 run /scripts/seed.js 2>&1 \
+ *     | sed -nE 's|^time=.*level=info msg="TOKEN:([^"]+)".*|\1|p' \
+ *     | jq -R . | jq -s . \
+ *     > scripts/k6/tokens.json
  *
- *   Or without file redirection (tokens printed to stdout at end of run):
- *   k6 run --env BASE_URL=http://localhost:8000 scripts/k6/seed.js
+ *   # Standalone k6 (not via docker compose):
+ *   k6 run --env BASE_URL=http://localhost:8000 scripts/k6/seed.js 2>&1 \
+ *     | sed -nE 's|^time=.*level=info msg="TOKEN:([^"]+)".*|\1|p' \
+ *     | jq -R . | jq -s . \
+ *     > scripts/k6/tokens.json
  *
  * Expected bottleneck:
  *   Postgres INSERT + SHA-256 token generation. At SEED_COUNT=1000 with 10 VUs
@@ -65,9 +73,10 @@ export default function () {
 }
 
 /**
- * handleSummary prints the full token list as JSON to stdout after the run.
- * The caller can capture this with:
- *   k6 run seed.js 2>/dev/null | grep '^TOKEN:' | sed 's/^TOKEN://' | jq -s '.' > tokens.json
+ * handleSummary just emits a reminder; token lines are captured from stderr via the
+ * pipeline documented in the header. k6 console.log writes to stderr with format:
+ *   time=... level=info msg="TOKEN:xxx" source=console
+ * Use `2>&1 | sed -nE 's|^time=.*level=info msg="TOKEN:([^"]+)".*|\1|p'` to extract tokens.
  *
  * Note: k6's open() is read-only; writing files from k6 is not supported without
  * an external xk6 extension. Use the shell redirect approach above.
@@ -75,8 +84,8 @@ export default function () {
 export function handleSummary(data) {
   // Return standard stdout summary; token lines were already printed during the run.
   return {
-    stdout: '\nSeed complete. Collect TOKEN: lines from above to build tokens.json.\n'
+    stdout: '\nSeed complete. Collect TOKEN: lines from stderr to build tokens.json.\n'
       + 'Example:\n'
-      + '  k6 run seed.js 2>/dev/null | grep "^TOKEN:" | sed "s/^TOKEN://" | jq -s "." > scripts/k6/tokens.json\n',
+      + '  k6 run seed.js 2>&1 | sed -nE \'s|^time=.*level=info msg="TOKEN:([^"]+)".*|\\1|p\' | jq -R . | jq -s . > scripts/k6/tokens.json\n',
   };
 }

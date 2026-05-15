@@ -31,7 +31,6 @@ def list_all(db: Session = Depends(get_db)):
         QRCodeListItem(
             qr_token=qr.qr_token,
             url=qr.url,
-            click_count=qr.click_count,
             status=qr.status,
             created_at=qr.created_at,
         )
@@ -78,7 +77,6 @@ def get_one(qr_token: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=410, detail="QR code has been deleted")
     return GetQRCodeResponse(
         url=qr.url,
-        click_count=qr.click_count,
         status=qr.status,
         created_at=qr.created_at,
     )

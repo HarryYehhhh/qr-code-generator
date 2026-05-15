@@ -54,18 +54,28 @@ export default function () {
     {
       headers: { 'Content-Type': 'application/json' },
       tags: { scenario: 'redirect_cold', step: 'create' },
+      // Override the global `discardResponseBodies: true` (set in lib/common.js)
+      // because we need to parse `qr_token` out of the response.
+      responseType: 'text',
     }
   );
 
   const created = check(createRes, {
     'create status 201': (r) => r.status === 201,
+    'has body': (r) => typeof r.body === 'string' && r.body.length > 0,
   });
 
   if (!created) {
     return;  // Skip redirect if creation failed to avoid 404 noise.
   }
 
-  const token = JSON.parse(createRes.body).qr_token;
+  let token;
+  try {
+    token = JSON.parse(createRes.body).qr_token;
+  } catch (_) {
+    return;  // Defensive: skip if body is malformed (shouldn't happen now).
+  }
+  if (!token) return;
 
   // Step 2: Immediately redirect — exercises DB fallback + Redis SETEX path.
   // Note: POST /v1/qr_code pre-warms the URL cache, so this first redirect is

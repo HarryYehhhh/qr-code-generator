@@ -29,7 +29,7 @@ docker-compose up -d
 
 # 2. Seed tokens (run once; creates scripts/k6/tokens.json)
 k6 run --env BASE_URL=http://localhost:8000 scripts/k6/seed.js \
-  2>/dev/null | grep "^TOKEN:" | sed 's/^TOKEN://' | jq -s '.' > scripts/k6/tokens.json
+  2>&1 | sed -nE 's|^time=.*level=info msg="TOKEN:([^"]+)".*|\1|p' | jq -R . | jq -s . > scripts/k6/tokens.json
 
 # 3. Run a scenario (choose one):
 k6 run --env BASE_URL=http://localhost:8000 scripts/k6/redirect_hot.js
@@ -47,7 +47,7 @@ docker-compose up -d
 
 # Seed tokens
 k6 run --env BASE_URL=http://localhost:8000 scripts/k6/seed.js \
-  2>/dev/null | grep "^TOKEN:" | sed 's/^TOKEN://' | jq -s '.' > scripts/k6/tokens.json
+  2>&1 | sed -nE 's|^time=.*level=info msg="TOKEN:([^"]+)".*|\1|p' | jq -R . | jq -s . > scripts/k6/tokens.json
 
 # Run redirect_hot via docker-compose k6 service (default script)
 docker-compose --profile loadtest run --rm k6
@@ -71,7 +71,7 @@ k6 run \
   --env BASE_URL=http://localhost:8000 \
   --env SEED_COUNT=1000 \
   scripts/k6/seed.js \
-  2>/dev/null | grep "^TOKEN:" | sed 's/^TOKEN://' | jq -s '.' > scripts/k6/tokens.json
+  2>&1 | sed -nE 's|^time=.*level=info msg="TOKEN:([^"]+)".*|\1|p' | jq -R . | jq -s . > scripts/k6/tokens.json
 ```
 
 **Output**: `tokens.json` — an array of `qr_token` strings. Required by `redirect_hot.js` and `image_mixed.js`.

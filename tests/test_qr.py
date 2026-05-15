@@ -46,7 +46,6 @@ class TestGetQRCode:
         assert resp.status_code == 200
         data = resp.json()
         assert data["url"] == "https://example.com"
-        assert data["click_count"] == 0
         assert data["status"] == "active"
         assert "created_at" in data
 
@@ -140,31 +139,6 @@ class TestRedirect:
     def test_redirect_not_found(self, client):
         resp = client.get("/r/nonexistent", follow_redirects=False)
         assert resp.status_code == 404
-
-    def test_redirect_records_click_in_redis(self, client, fake_redis):
-        """Redirects publish to the stream; worker.run_once flushes counts to the hash."""
-        from datetime import datetime, timezone
-
-        from app.services.click_stream import GROUP_NAME, ensure_group
-        from app.worker import FlushBuffer, flush, run_once
-
-        token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]
-        client.get(f"/r/{token}", follow_redirects=False)
-        client.get(f"/r/{token}", follow_redirects=False)
-
-        # Stream should have 2 entries; hash not yet populated
-        from app.services.click_stream import STREAM_KEY
-        assert fake_redis.xlen(STREAM_KEY) == 2
-
-        # Run the worker cycle to flush counts into the hash
-        ensure_group(fake_redis)
-        buffer = FlushBuffer()
-        run_once(fake_redis, "test-consumer", buffer)
-        flush(fake_redis, buffer)
-
-        hour = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
-        count = fake_redis.hget(f"qr:clicks:{hour}", token)
-        assert int(count) == 2
 
     def test_redirect_cache_hit(self, client, fake_redis):
         token = client.post("/v1/qr_code", json={"url": "https://example.com"}).json()["qr_token"]

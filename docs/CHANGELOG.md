@@ -10,6 +10,24 @@ Harness 執行記錄。**最新的在上面**（reverse chronological）。
 - 備註：循環次數、未解問題、後續工作（若有）
 ```
 
+## 2026-05-15 — simplify-observability — manual refactor — 移除 OTel + Prometheus stack，保留 structlog
+
+- 連結：[ADR-0004](decisions/0004-simplify-observability-keep-structlog.md)（部分 supersedes ADR-0002）
+- 動作：刪 `app/observability.py`、`app/metrics.py`、`tests/test_observability.py`、`tests/test_metrics.py`、`tests/test_span_attributes.py`、`tests/test_docs_observability.py`、`docker/prometheus.yml`、整個 `docker/grafana/` 目錄；改 `app/main.py`（移除 init_tracing / Instrumentator / span 建立 / metric 呼叫；redirect 改用 `logger.info` 帶 cache_result）、`app/services/qr_service.py`（移除 manual span）、`app/services/image_service.py`（移除 span + metric，改用 logger）、`app/logging.py`（移除 `_add_trace_context` processor）、`tests/conftest.py`（移除 tracer / exporter fixtures）、`tests/test_compose_loadtest_profile.py`（移除 prometheus 斷言）、`tests/test_requirements_pinned.py`（改檢查核心依賴）、`docker-compose.yml`（移除 jaeger/prometheus/grafana service + OTEL env）、`requirements.txt`（移除 9 個套件，保留 structlog）、`CLAUDE.md` + `README.md` + `docs/architecture.md` Observability 段
+- API 變動：`/metrics` endpoint 不再存在
+- Stack 變動：docker compose 從 7 個 service（api/postgres/redis/jaeger/prometheus/grafana/k6 loadtest）縮成 4 個（api/postgres/redis/k6 loadtest）
+- 驗證：`pytest tests/ -q` → **44 passed**（從 61 降到 44，刪掉 17 個 obs/metrics/span 相關 test）；docker compose 重建 + smoke：POST/GET/redirect/image 全綠、`/metrics → 404`、structured JSON log 正常輸出（含 cache_result 欄位）
+- LOC 影響：~ -600 LOC + 3 個 docker container + 9 個 dependency
+- 後續：可重跑 k6 baseline vs current 驗證 OTel overhead 移除後 current 應追上 baseline
+
+## 2026-05-15 — remove-click-counting-mvp — manual refactor — Sprint A click pipeline 整套移除，focus 收斂在 redirect
+
+- 連結：[ADR-0003](decisions/0003-remove-click-counting-mvp.md)（supersedes ADR-0001）；[`docs/architecture.md`](architecture.md)（新增的目標架構文件）
+- 動作：刪 `app/services/click_stream.py`、`app/worker.py`、`app/jobs/`、`app/routers/internal.py`、`tests/test_click_stream.py`；改 `app/main.py` / `app/models.py` / `app/schemas.py` / `app/metrics.py` / `app/routers/qr.py` / `tests/test_metrics.py` / `tests/test_span_attributes.py`；新增 alembic migration `0003_remove_click_counting`；改 `docker-compose.yml` 拿掉 worker service；大幅 update `CLAUDE.md` / `README.md`
+- API 變動：`GET /v1/qr_codes` 與 `GET /v1/qr_code/{token}` 不再回傳 `click_count`；`/internal/flush_clicks` 整 endpoint 移除
+- 驗證：`pytest tests/ -q` → 61 passed（舊 81 pass，刪 20 click 相關 test）；`docker compose up` + `alembic upgrade head` + 手動 POST/GET/redirect/image smoke test 全綠；`/metrics` 已不含 `qr_click_stream_*`
+```
+
 ---
 
 <!-- 新條目從這裡開始 -->

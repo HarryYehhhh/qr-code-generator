@@ -29,7 +29,6 @@ class CreateQRCodeResponse(BaseModel):
 
 class GetQRCodeResponse(BaseModel):
     url: str
-    click_count: int
     status: str
     created_at: datetime
 
@@ -37,7 +36,6 @@ class GetQRCodeResponse(BaseModel):
 class QRCodeListItem(BaseModel):
     qr_token: str
     url: str
-    click_count: int
     status: str
     created_at: datetime
 

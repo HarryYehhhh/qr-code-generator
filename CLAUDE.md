@@ -31,11 +31,10 @@ curl http://localhost:8000/v1/qr_code/{qr_token}
 curl "http://localhost:8000/v1/qr_code_image/{qr_token}?dimension=256&color=%23000000&border=4"
 curl -L http://localhost:8000/r/{qr_token}
 
-# Run the click-stream worker (Sprint A)
-python -m app.worker
-
-# Start full local stack (api + worker + redis + postgres) via Docker Compose
-docker-compose up
+# Start full local stack (api + redis + postgres) via Docker Compose
+docker compose up -d
+# After first start, run migrations once (Postgres schema is alembic-controlled)
+docker compose exec api alembic upgrade head
 
 # Run tests
 pytest tests/ -v
@@ -56,6 +55,8 @@ gcloud run deploy qr-code-generator \
 
 ## Architecture
 
+> **Scope** ([ADR-0003](docs/decisions/0003-remove-click-counting-mvp.md)): the project focuses on the **redirect + QR-image path**. Click counting / analytics has been removed from the MVP — `qr_click_stats` table, the worker process, and the click stream pipeline no longer exist. If you're reading historical Sprint A docs, treat that pipeline as deprecated. Full architecture diagram: [`docs/architecture.md`](docs/architecture.md).
+
 QR Code Generator using FastAPI backend (API-only, no frontend). Local dev uses SQLite; production uses Cloud SQL PostgreSQL on Cloud Run. Image bytes are cached in Redis (no GCS / CDN — see Image Cache section).
 
 ### ENV Switch Pattern
@@ -73,12 +74,12 @@ QR Code Generator using FastAPI backend (API-only, no frontend). Local dev uses 
 DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries filter `status == 'active'`. Rows are never physically removed.
 
 ### Redirect Route
-`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Reads URL from Redis (`qr:url:{token}`) — falls back to DB on cache miss and populates the cache. Click counting is async: fires `XADD clicks:stream … MAXLEN ~ 100000` (producer) — the worker process drains the stream and writes to `qr:clicks:{hour}`. `click_count` and `last_clicked_at` are populated by the hourly flush job (see Click Stats Pipeline). Registered **after** `/v1` router to avoid path conflicts.
+`GET /r/{qr_token}` in `app/main.py` returns 302 (not 301) to allow URL updates to take effect. Reads URL from Redis (`qr:url:{token}`) — falls back to DB on cache miss and populates the cache. Registered **after** `/v1` router to avoid path conflicts.
 
 ### API Contracts
 - `POST /v1/qr_code` → `{"qr_token": "..."}` (201)
-- `GET /v1/qr_codes` → `[{qr_token, url, click_count, status, created_at}]` (200)
-- `GET /v1/qr_code/{token}` → `{url, click_count, status, created_at}` (200) or 410 if deleted
+- `GET /v1/qr_codes` → `[{qr_token, url, status, created_at}]` (200)
+- `GET /v1/qr_code/{token}` → `{url, status, created_at}` (200) or 410 if deleted
 - `PUT /v1/qr_code/{token}` → 204
 - `DELETE /v1/qr_code/{token}` → 204 (soft delete)
 - `GET /v1/qr_code_image/{token}?dimension=&color=&border=` → `image/png` bytes (200), `Cache-Control: public, max-age=300, must-revalidate`
@@ -87,28 +88,9 @@ DELETE endpoint sets `status='deleted'` + `deleted_at` timestamp. All queries fi
 ### Schema Migrations
 Alembic is the source of truth for production schema. `alembic/env.py` reads `settings.DATABASE_URL` and imports `app.models` so `--autogenerate` sees all tables. The lifespan in `app/main.py` only runs `create_all` on SQLite — PostgreSQL must be migrated explicitly via `alembic upgrade head`. Tests still use `create_all` directly because they target a transient SQLite DB.
 
-### Click Stats Pipeline (Sprint A — Redis Streams)
+### Click Counting (removed — see ADR-0003)
 
-**Decision**: see [docs/decisions/0001-redis-streams-for-click-pipeline.md](docs/decisions/0001-redis-streams-for-click-pipeline.md)
-
-**Producer** (`app/main.py` → `app/services/click_stream.py`):
-- `_record_click()` calls `publish_click(redis, token, ts)` which does `XADD clicks:stream {"token": ..., "ts": <ISO8601 UTC>} MAXLEN ~ 100000`.
-- Failures are swallowed so that a Redis hiccup never blocks the 302 redirect.
-
-**Consumer / Worker** (`app/worker.py`):
-- Runs as a separate process: `python -m app.worker`.
-- On startup: `XGROUP CREATE clicks:stream click-aggregator $ MKSTREAM` (idempotent), then `XPENDING` + `XCLAIM` to reclaim orphaned entries from dead consumers.
-- Main loop: `XREADGROUP click-aggregator <consumer_name> clicks:stream > COUNT <BATCH_SIZE> BLOCK 1000ms`.
-- Accumulates counts in `FlushBuffer` (in-memory `{hour_bucket: {token: count}}`).
-- Flush trigger: `len(pending_ids) >= BATCH_SIZE` OR `elapsed >= FLUSH_INTERVAL_SECONDS` (default 5 s).
-- Flush: `HINCRBY qr:clicks:{hour} token count` for each bucket/token pair → `XACK` all entry IDs.
-- Idempotency: `SET qr:clicks:dedupe:{entry_id} 1 EX 3600 NX` before counting — replayed entries (from XCLAIM) are acked and skipped.
-- Handles `SIGTERM` / `SIGINT` by flushing the buffer before exit.
-
-**Hourly flush job** (`app/jobs/flush_clicks.py`) is **unchanged**:
-- Drains `qr:clicks:{YYYY-MM-DD-HH}` hash into `qr_click_stats` via rename-then-delete + `ON CONFLICT DO UPDATE`.
-- Auth: `X-Internal-Token` header against `settings.INTERNAL_TOKEN`.
-- Production: triggered by Cloud Scheduler every hour at :05.
+Sprint A originally implemented a Redis-Streams + worker pipeline for click counting (ADR-0001). It was removed in [ADR-0003](docs/decisions/0003-remove-click-counting-mvp.md) so the MVP focuses on the redirect path only. If you need to add it back later (or replace with a real analytics tier), the historical Sprint A spec / contract / QA report under `docs/{specs,contracts,qa-reports}/sprint-a-click-stream.md` is the starting point. The recommended modern shape is **Cloud CDN edge logs → Pub/Sub → BigQuery**, not a worker that writes back into the redirect-tier Postgres.
 
 ### Testing
 Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `tests/conftest.py` overrides the `get_db` dependency so tests never touch the dev database. Each test gets a fresh schema via `create_all` / `drop_all`.
@@ -116,7 +98,7 @@ Tests use FastAPI `TestClient` with a separate SQLite DB (`test_qr_codes.db`). `
 ### Production Infrastructure (GCP)
 - **Cloud Run**: Stateless container, port 8080, single uvicorn process (no `--workers`)
 - **Cloud SQL**: PostgreSQL 15 via Cloud SQL Python Connector (`pg8000` driver), public IP. Selected when `INSTANCE_CONNECTION_NAME` env var is set; otherwise `DATABASE_URL` is used directly (Docker compose / Auth Proxy).
-- **Memorystore for Redis**: holds redirect URL cache, click counters, and image PNG bytes. Lives in a VPC, so Cloud Run reaches it via a Serverless VPC Access connector (`--vpc-connector`).
+- **Memorystore for Redis**: holds the redirect URL cache and image PNG bytes. Lives in a VPC, so Cloud Run reaches it via a Serverless VPC Access connector (`--vpc-connector`).
 - **Artifact Registry**: Docker images stored in `asia-east1-docker.pkg.dev/<PROJECT_ID>/qr-repo/`
 
 ### Image Cache
@@ -131,7 +113,7 @@ QR PNG bytes are cached directly in Redis — no GCS, no disk, no CDN.
 Sized for `db-f1-micro` (~25 max_connections):
 - `pool_size=1, max_overflow=2, pool_timeout=10, pool_recycle=300, pool_pre_ping=True`
 - Per-instance budget: 3 connections
-- **Cloud Run `--max-instances=6`** → max 18 conn for app, leaves ~7 for admin / hourly flush job / psql
+- **Cloud Run `--max-instances=6`** → max 18 conn for app, leaves ~7 for admin / psql
 - The Connector is a lazy module-level singleton in `app/database.py`. **Never add `--workers > 1`** to uvicorn without moving Connector init into FastAPI lifespan — the Connector's background thread does not survive `fork()`.
 
 ### Recommended Cloud Run deploy flags
@@ -144,23 +126,18 @@ gcloud run deploy qr-code-generator \
   --vpc-connector=qr-connector \
   --service-account=qr-runtime@<PROJECT>.iam.gserviceaccount.com \
   --set-env-vars=ENVIRONMENT=production,INSTANCE_CONNECTION_NAME=<PROJECT>:asia-east1:<INSTANCE>,DB_USER=qrapp,DB_NAME=qrdb,CLOUD_SQL_IP_TYPE=PUBLIC,REDIS_URL=redis://<MEMORYSTORE_IP>:6379/0 \
-  --set-secrets=DB_PASS=qr-db-pass:latest,SERVER_SECRET=qr-server-secret:latest,INTERNAL_TOKEN=qr-internal-token:latest
+  --set-secrets=DB_PASS=qr-db-pass:latest,SERVER_SECRET=qr-server-secret:latest
 ```
 - The Connector replaces Unix socket — **do not** pass `--add-cloudsql-instances`.
 - Service account needs `roles/cloudsql.client` and `roles/redis.editor`.
-- DB password and `INTERNAL_TOKEN` live in Secret Manager.
+- DB password lives in Secret Manager.
 - See [README.md](README.md) for the full step-by-step deploy including Memorystore + VPC connector + Cloud Scheduler setup.
 
 ### Observability
 
-Three observability modules work together:
-- **`app/observability.py`**: Initialises the OpenTelemetry SDK, configures tracer provider, and registers instrumentors for FastAPI, SQLAlchemy, and Redis. Switches between Jaeger OTLP exporter (local) and GCP Cloud Trace exporter (production) based on `ENVIRONMENT`.
-- **`app/logging.py`**: Configures `structlog` with JSON output in production, console-friendly output locally. Injects `trace_id` and `span_id` into every log record for cross-tool correlation.
-- **`app/metrics.py`**: Defines custom Prometheus counters and gauges (`qr_redirect_total`, `qr_image_cache_total`, `qr_db_pool_in_use`, `qr_click_stream_lag`, `qr_click_stream_published_total`, `qr_click_stream_consumed_total`). Exposed at `/metrics` via `prometheus-fastapi-instrumentator`.
+Single module: **`app/logging.py`** configures `structlog` to emit JSON lines to stdout. On Cloud Run, Cloud Logging parses every line natively (queryable / alertable). Locally, `docker compose logs api | jq .` to read.
 
-Decision rationale: [docs/decisions/0002-otel-with-dual-exporter.md](docs/decisions/0002-otel-with-dual-exporter.md) (ADR-0002).
-
-Production note: Cloud Run service account requires `roles/cloudtrace.agent` for GCP trace export.
+Sprint B previously added OpenTelemetry tracing (Jaeger / Cloud Trace) and Prometheus metrics. Both removed in [ADR-0004](docs/decisions/0004-simplify-observability-keep-structlog.md) — the SDK overhead (~5–10 % p50) was not justified for a single-process service whose Cloud Run console already provides latency / RPS / error rate. ADR-0002 is kept as historical record only.
 
 ### Performance / Load Testing
 

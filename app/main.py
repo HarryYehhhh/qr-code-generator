@@ -1,6 +1,4 @@
-import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -14,57 +12,29 @@ from app.config import settings
 from app.database import Base, close_connector, engine, get_db
 from app.dependencies import get_redis
 from app.logging import configure_logging, get_logger
-from app.routers import internal as internal_router
 from app.routers import qr
-from app.services.click_stream import publish_click
 from app.services.qr_service import get_qr_code_any_status
 
 configure_logging()
 logger = get_logger(__name__)
 
 
-async def _pool_monitor_task() -> None:
-    """Background task: update DB pool gauge every 5 seconds."""
-    from app.metrics import set_db_pool_in_use
-
-    while True:
-        try:
-            checked_out = engine.pool.checkedout()
-            set_db_pool_in_use(checked_out)
-        except Exception:
-            pass
-        await asyncio.sleep(5)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
-
-    from app.observability import init_tracing
-    init_tracing("qr-api")
 
     # SQLite (local dev) auto-creates tables for fast reset; PostgreSQL relies
     # on `alembic upgrade head` so production schema stays version-controlled
     if settings.DATABASE_URL.startswith("sqlite"):
         Base.metadata.create_all(bind=engine)
 
-    pool_task = asyncio.create_task(_pool_monitor_task())
     try:
         yield
     finally:
-        pool_task.cancel()
-        try:
-            await pool_task
-        except asyncio.CancelledError:
-            pass
         close_connector()
 
 
 app = FastAPI(title="QR Code Generator", lifespan=lifespan)
-
-# Expose /metrics before other middleware so Prometheus can scrape it
-from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
-Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,7 +45,6 @@ app.add_middleware(
 )
 
 app.include_router(qr.router)
-app.include_router(internal_router.router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -99,59 +68,25 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-_tracer = None
-
-
-def _get_tracer():
-    global _tracer
-    if _tracer is None:
-        from opentelemetry import trace as _trace
-        _tracer = _trace.get_tracer(__name__)
-    return _tracer
-
-
 @app.get("/r/{qr_token}")
 async def redirect(
     qr_token: str,
     db: Session = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
-    from app.metrics import observe_redirect
+    cache_key = f"qr:url:{qr_token}"
+    cached_url = redis.get(cache_key)
 
-    tracer = _get_tracer()
-    with tracer.start_as_current_span("redirect") as span:
-        cache_key = f"qr:url:{qr_token}"
-        cached_url = redis.get(cache_key)
+    if cached_url:
+        logger.info("redirect", qr_token=qr_token, cache_result="hit")
+        return RedirectResponse(url=cached_url.decode(), status_code=302)
 
-        if cached_url:
-            span.set_attribute("qr.token", qr_token)
-            span.set_attribute("qr.cache_result", "hit")
-            observe_redirect("hit")
-            _record_click(redis, qr_token)
-            return RedirectResponse(url=cached_url.decode(), status_code=302)
+    qr = get_qr_code_any_status(db, qr_token)
+    if not qr:
+        raise HTTPException(status_code=404, detail="QR code not found")
+    if qr.status == "deleted":
+        raise HTTPException(status_code=410, detail="QR code has been deleted")
 
-        qr = get_qr_code_any_status(db, qr_token)
-        if not qr:
-            raise HTTPException(status_code=404, detail="QR code not found")
-        if qr.status == "deleted":
-            raise HTTPException(status_code=410, detail="QR code has been deleted")
-
-        redis.setex(cache_key, 86400, qr.url)
-        span.set_attribute("qr.token", qr_token)
-        span.set_attribute("qr.cache_result", "miss")
-        observe_redirect("miss")
-        _record_click(redis, qr_token)
-        return RedirectResponse(url=qr.url, status_code=302)
-
-
-def _record_click(redis: Redis, token: str) -> None:
-    """Publish a click event to the Redis Stream.
-
-    Failures are swallowed so that a Redis hiccup never breaks the 302 redirect.
-    """
-    try:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        publish_click(redis, token, ts)
-    except Exception as exc:
-        # Best-effort: a pipeline outage must not affect redirect SLA
-        logger.warning("publish_click failed", error=str(exc))
+    redis.setex(cache_key, 86400, qr.url)
+    logger.info("redirect", qr_token=qr_token, cache_result="miss")
+    return RedirectResponse(url=qr.url, status_code=302)
