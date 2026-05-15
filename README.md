@@ -50,7 +50,7 @@ graph LR
     Redis[(Redis :6379)]
 
     Client -->|API request| API
-    API -->|metadata (cache miss)| DB
+    API -->|"metadata (cache miss)"| DB
     API -->|URL cache + PNG bytes| Redis
 ```
 
