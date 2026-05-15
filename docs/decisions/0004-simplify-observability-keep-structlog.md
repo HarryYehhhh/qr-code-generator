@@ -17,7 +17,7 @@ Sprint B 加入了三本柱觀測性：OpenTelemetry tracing（雙 exporter：lo
 | Prometheus + Grafana | 自製 dashboard、設 alert rule、看歷史趨勢 | Cloud Run console 已經免費提供 latency / error rate / RPS / log search |
 | structlog JSON | log 跨工具 grep / 結構化 query / Cloud Logging 自動解析欄位 | **真實有用**——production 上 stdout JSON → Cloud Logging 直接吃，本地 dev 也比 stdlib 友善 |
 
-實測壓測（[`docs/perf-baseline-comparison.md`](../perf-baseline-comparison.md)）顯示 OTel SDK 在 hot 路徑造成 ~5–10 % throughput regression（baseline 2060 → current 1901 RPS、p50 從 66 → 71 ms）。也就是「我們花了 cost 但對單機 single-process 應用沒拿到對等價值」。
+實測壓測顯示 OTel SDK 在 hot 路徑造成 ~5–10 % throughput / p50 regression，對單機 single-process 應用「花了 cost 但沒拿到對等價值」（Cloud Run console 已免費提供 latency / RPS / error rate）。最終三架構壓測數據見 [`docs/perf-report.md`](../perf-report.md)。
 
 ## Decision
 
