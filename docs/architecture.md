@@ -61,15 +61,15 @@ GET /r/{token}
                           └─── not found → 404
 ```
 
-實測效能（Sprint C，commit `1fcb25b`，Apple M4 Pro）：
+實測效能（current 架構：無 click，structlog-only，Apple M4 Pro）：
 
-| Scenario | Steady RPS | p50 | p99 | Bottleneck |
+| Scenario | RPS | p50 | p99 | Bottleneck |
 | --- | --- | --- | --- | --- |
-| redirect_hot (cache hit) | ~1,900 | 56 ms | 461 ms | uvicorn event loop |
-| redirect_cold (POST + GET) | ~580 (each) | 39 ms | 78 ms | DB pool（pinned 在 3） |
-| image_mixed (50 % cache miss) | ~500 | 223 ms | 494 ms | `qrcode` lib CPU |
+| redirect_hot (cache hit) | ~2,600 | 51 ms | 190 ms | uvicorn event loop |
+| redirect_cold (POST + GET) | ~1,400 | 33 ms | 77 ms | DB pool（pinned 在 3） |
+| image_mixed (50 % cache miss) | ~458 | 115 ms | 263 ms | `qrcode` lib CPU |
 
-完整數據：[docs/perf-report.md](perf-report.md)、[docs/perf-baseline-comparison.md](perf-baseline-comparison.md)。
+完整數據與三架構對比：[docs/perf-report.md](perf-report.md)。
 
 ---
 
@@ -177,10 +177,7 @@ docs/
 ├── specs/               # Sprint specs（產品意圖）
 ├── contracts/           # Sprint contracts（工作契約）
 ├── qa-reports/          # Evaluator 產出的驗收報告
-├── perf-report.md       # Sprint C 壓測結果
-├── perf-baseline-comparison.md  # baseline vs current 對比
-├── load-test-plan.md    # 壓測 SOP
-├── incidents/           # Postmortem
+├── perf-report.md       # 三架構壓測結果
 └── CHANGELOG.md         # 各 sprint 時序紀錄
 
 scripts/k6/              # k6 load test scripts (seed, hot, cold, image, stress)

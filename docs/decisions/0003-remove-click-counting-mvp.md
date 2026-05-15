@@ -67,7 +67,7 @@ Sprint A 把點擊計數從同步 HINCRBY 拆成 Redis Streams + 獨立 worker p
 ### 中性
 
 - 觀測性（Sprint B）跟壓測（Sprint C）仍然 100 % 適用 redirect 路徑——這兩個 sprint 的價值不依賴 click counting。
-- Baseline vs current 對比報告（[`docs/perf-baseline-comparison.md`](../perf-baseline-comparison.md)）仍然有效——baseline 跟 current 量到的 RPS / p99 都是 redirect path 的數字。
+- 三架構壓測報告（[`docs/perf-report.md`](../perf-report.md)）量到的 RPS / p99 都是 redirect path 的數字，移除 click counting 不影響其有效性。
 
 ## Alternatives considered
 
